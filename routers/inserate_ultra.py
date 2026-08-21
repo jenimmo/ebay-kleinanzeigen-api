@@ -1,75 +1,75 @@
-"""
-Ultra-optimized router for maximum performance scraping.
-"""
+"""Deprecated GET adapter for the persistent search-job API."""
 
 from datetime import datetime
-from typing import Optional
 
-from fastapi import APIRouter, Query, Request, HTTPException
-from scrapers.inserate_ultra_optimized import ultra_optimized_scrape_inserate
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
+
+from routers.jobs import (
+    IDEMPOTENCY_KEY_PATTERN,
+    JobAcceptedResponse,
+    SearchJobRequest,
+    submit_search_job,
+)
 
 router = APIRouter()
 
 
-@router.get("/inserate")
+@router.get(
+    "/inserate",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=JobAcceptedResponse,
+    deprecated=True,
+)
 async def get_inserate_ultra_optimized(
     request: Request,
-    query: str = Query(None, description="Search query string"),
-    location: str = Query(None, description="Location filter"),
-    radius: int = Query(None, description="Search radius in kilometers"),
-    min_price: int = Query(None, description="Minimum price filter"),
-    max_price: int = Query(None, description="Maximum price filter"),
-    page_count: int = Query(1, ge=1, le=20, description="Number of pages to fetch"),
-    min_publish_date: Optional[datetime] = Query(
+    response: Response,
+    query: str | None = Query(None, max_length=512, description="Search query"),
+    location: str | None = Query(None, max_length=512, description="Location"),
+    radius: int | None = Query(None, ge=0, description="Search radius in km"),
+    min_price: int | None = Query(None, ge=0, description="Minimum price"),
+    max_price: int | None = Query(None, ge=0, description="Maximum price"),
+    page_count: int = Query(
+        1,
+        ge=1,
+        deprecated=True,
+        description=(
+            "Ignored compatibility parameter; persistent jobs discover pages "
+            "automatically and pause after each 200 released results"
+        ),
+    ),
+    min_publish_date: datetime | None = Query(
         None,
-        description="Stop fetching once listings published before this datetime (inclusive, format: YYYY-MM-DDTHH:MM:SS)",
+        description="Stop once older listings are reached",
+    ),
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=128,
+        pattern=IDEMPOTENCY_KEY_PATTERN,
     ),
 ):
-    """
-    Fetch listings based on search criteria.
+    """Accept the former search shape and enqueue a persistent search job."""
 
-    Retrieves listings from Kleinanzeigen with support for various filters
-    including location, price range, and search terms. Results are returned
-    with performance metrics and success indicators.
-    """
-    browser_manager = request.app.state.browser_manager
-    if not browser_manager:
-        raise HTTPException(status_code=503, detail="Service unavailable")
+    if min_price is not None and max_price is not None and min_price > max_price:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="min_price must not exceed max_price",
+        )
 
-    try:
-        # Execute ultra-optimized scraping
-        result = await ultra_optimized_scrape_inserate(
-            browser_manager=browser_manager,
+    # Keep this compatibility parameter without allowing it to truncate a job.
+    del page_count
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = '</jobs/search>; rel="successor-version"'
+    return await submit_search_job(
+        request,
+        SearchJobRequest(
             query=query,
             location=location,
             radius=radius,
             min_price=min_price,
             max_price=max_price,
-            page_count=page_count,
             min_publish_date=min_publish_date,
-        )
-
-        # Clean up response - remove excessive metrics for production
-        if "task_metrics" in result:
-            del result["task_metrics"]
-        if "optimization_features" in result:
-            del result["optimization_features"]
-
-        # Simplify performance metrics
-        if "performance_metrics" in result:
-            metrics = result["performance_metrics"]
-            # Keep only essential metrics
-            essential_metrics = {
-                "pages_requested": metrics.get("pages_requested", 0),
-                "pages_successful": metrics.get("pages_successful", 0),
-                "success_rate": metrics.get("success_rate", 0),
-                "average_page_time": metrics.get("average_page_time", 0),
-            }
-            result["performance_metrics"] = essential_metrics
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=500, detail="Internal server error")
+        ),
+        idempotency_key=idempotency_key,
+    )

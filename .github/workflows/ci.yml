@@ -24,28 +24,27 @@ jobs:
           cache: 'pip'
       
       - name: Install uv
-        run: pip install uv
+        run: pip install uv==0.11.14
       
       - name: Cache uv dependencies
         uses: actions/cache@v6
         with:
           path: ~/.cache/uv
-          key: ${{ runner.os }}-uv-${{ hashFiles('requirements.txt') }}
+          key: ${{ runner.os }}-uv-${{ hashFiles('uv.lock') }}
           restore-keys: |
             ${{ runner.os }}-uv-
       
       - name: Install dependencies with uv
         run: |
-          uv venv
-          source .venv/bin/activate
-          uv pip install -r requirements.txt
-          uv pip install ruff==0.15.14
+          uv sync --locked --group dev
       
       - name: Run Ruff linting and formatting check
         run: |
-          source .venv/bin/activate
-          ruff check . --output-format=github
-          ruff format --check .
+          uv run ruff check . --output-format=github
+          uv run ruff format --check .
+
+      - name: Run offline test suite
+        run: uv run pytest
 
   build:
     runs-on: ubuntu-latest
@@ -57,20 +56,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
-      - name: Set up Python for caching
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-          cache: 'pip'
-
-      - name: Cache uv dependencies
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/uv
-          key: ${{ runner.os }}-uv-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-uv-
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4

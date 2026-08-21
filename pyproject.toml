@@ -1,17 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "ebay-kleinanzeigen-api"
 version = "0.1.0"
 description = "Add your description here"
-readme = "README.md"
+readme = "README.MD"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.12.15",
+    "aiosqlite>=0.21.0",
     "fastapi>=0.115.6",
     "httpx>=0.28.1",
     "loguru>=0.7.3",
     "playwright>=1.49.0",
-    "pytest>=8.4.1",
+    "pydantic>=2.0.0",
     "python-multipart>=0.0.20",
     "uvicorn>=0.34.0",
     "uvloop>=0.21.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
+    "ruff==0.15.14",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+addopts = ["--strict-markers", "-ra"]
+python_files = ["test_*.py", "simple_test.py"]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "live: requires a running API server and may access Kleinanzeigen over the network (enable with --run-live)",
+]
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["libs*", "routers*", "scrapers*", "utils*"]
+exclude = ["tests*"]
+namespaces = true

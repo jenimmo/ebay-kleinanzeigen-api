@@ -302,9 +302,8 @@ class PerformanceValidator:
             required_fields = [
                 "pages_requested",
                 "pages_successful",
-                "pages_failed",
-                "concurrent_level",
-                "page_details",
+                "success_rate",
+                "average_page_time",
             ]
 
             missing_fields = [
@@ -323,10 +322,9 @@ class PerformanceValidator:
 
             pages_requested = perf_metrics["pages_requested"]
             pages_successful = perf_metrics["pages_successful"]
-            pages_failed = perf_metrics["pages_failed"]
 
             # Validate page counts
-            page_count_valid = (pages_successful + pages_failed) == pages_requested
+            page_count_valid = 0 <= pages_successful <= pages_requested
             pages_requested_correct = pages_requested == params["page_count"]
 
             return {

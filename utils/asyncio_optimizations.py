@@ -42,6 +42,9 @@ class HighPerformanceTaskManager:
     """
 
     def __init__(self, max_concurrent: int = 10):
+        if max_concurrent < 1:
+            raise ValueError("max_concurrent must be at least 1")
+
         self.tasks: weakref.WeakSet = weakref.WeakSet()
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self._task_metrics: Dict[str, TaskMetrics] = {}
@@ -194,6 +197,9 @@ class MemoryOptimizedProcessor:
     """
 
     def __init__(self, max_concurrent: int = 50, gc_threshold: int = 1000):
+        if max_concurrent < 1:
+            raise ValueError("max_concurrent must be at least 1")
+
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.processed_count = 0
         self.gc_threshold = gc_threshold

@@ -11,9 +11,13 @@ RUN playwright install --with-deps chromium
 
 COPY . .
 
+# Persistent jobs/results live here. Mount /app/data as a volume in production.
+RUN mkdir -p /app/data
+ENV KLEINANZEIGEN_JOB_DATABASE_PATH=/app/data/kleinanzeigen_jobs.sqlite3
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs')" || exit 1
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

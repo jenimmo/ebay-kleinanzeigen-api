@@ -7,6 +7,18 @@ This test suite validates the core functionality without strict performance limi
 import asyncio
 import time
 import aiohttp
+import pytest
+
+
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skip(
+        reason=(
+            "Historische synchrone Endpunkt-Suite; durch "
+            "test_persistent_jobs_live.py ersetzt"
+        )
+    ),
+]
 
 
 async def test_all_endpoints():

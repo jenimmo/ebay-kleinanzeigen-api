@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, HTTPException, Request
 from scrapers.inserate import get_inserate_klaz_optimized
 from utils.error_handling import ErrorLogger, error_handling_context, ErrorSeverity
+from utils.outbound_control import OutboundControlError
 
 router = APIRouter()
 
@@ -28,6 +29,7 @@ async def get_inserate(
     ) as error_ctx:
         # Use shared browser manager from app state
         browser_manager = request.app.state.browser_manager
+        outbound_controller = request.app.state.outbound_controller
 
         try:
             # Validate input parameters
@@ -41,12 +43,13 @@ async def get_inserate(
             # Use optimized scraper function
             response = await get_inserate_klaz_optimized(
                 browser_manager,
-                query,
-                location,
-                radius,
-                min_price,
-                max_price,
-                page_count,
+                outbound_controller,
+                query=query,
+                location=location,
+                radius=radius,
+                min_price=min_price,
+                max_price=max_price,
+                page_count=page_count,
             )
 
             # Handle scraper errors
@@ -151,6 +154,8 @@ async def get_inserate(
 
         except HTTPException:
             # Re-raise HTTP exceptions (already handled above)
+            raise
+        except OutboundControlError:
             raise
         except Exception as e:
             # Handle unexpected errors

@@ -23,6 +23,7 @@ from utils.error_handling import (
     ErrorSeverity,
     error_handling_context,
 )
+from utils.outbound_control import OutboundControlError, OutboundController
 
 router = APIRouter()
 
@@ -70,6 +71,7 @@ def optimize_concurrent_detail_fetching(
 
 async def fetch_listing_details_concurrent(
     browser_manager: OptimizedPlaywrightManager,
+    outbound_controller: OutboundController,
     listings: List[Dict[str, Any]],
     max_concurrent_details: int = 5,
 ) -> tuple[List[Dict[str, Any]], List[PageMetrics], List[str]]:
@@ -103,7 +105,7 @@ async def fetch_listing_details_concurrent(
     async def fetch_single_detail_with_retry(
         listing: Dict[str, Any],
         index: int,
-        max_retries: int = 2,
+        max_retries: int = 0,
         warning_manager: WarningManager = None,
         logger: ErrorLogger = None,
     ) -> tuple[Optional[Dict[str, Any]], PageMetrics]:
@@ -157,8 +159,8 @@ async def fetch_listing_details_concurrent(
                     # Fetch detailed information using optimized function
                     detail_response = await get_inserate_details_optimized(
                         browser_manager,
+                        outbound_controller,
                         listing_id,
-                        retry_count=1,  # Internal retry in detail function
                     )
 
                     if detail_response["success"]:
@@ -280,6 +282,8 @@ async def fetch_listing_details_concurrent(
                         # All retries exhausted
                         break
 
+                except OutboundControlError:
+                    raise
                 except Exception as e:
                     # Classify unexpected exceptions
                     error_context = ErrorContext(
@@ -373,6 +377,10 @@ async def fetch_listing_details_concurrent(
 
     # Execute all detail fetches concurrently with comprehensive error handling
     detail_results = await asyncio.gather(*detail_tasks, return_exceptions=True)
+
+    for detail_result in detail_results:
+        if isinstance(detail_result, OutboundControlError):
+            raise detail_result
 
     # Process results with comprehensive error tracking and structured warnings
     detailed_listings = []
@@ -569,6 +577,7 @@ async def get_inserate_with_details(
 
         # Use shared browser manager from app state
         browser_manager = request.app.state.browser_manager
+        outbound_controller = request.app.state.outbound_controller
 
         # Initialize performance tracking for the entire operation
         tracker = PerformanceTracker()
@@ -578,12 +587,13 @@ async def get_inserate_with_details(
             # Phase 1: Fetch listings
             listings_response = await get_inserate_klaz_optimized(
                 browser_manager,
-                query,
-                location,
-                radius,
-                min_price,
-                max_price,
-                page_count,
+                outbound_controller,
+                query=query,
+                location=location,
+                radius=radius,
+                min_price=min_price,
+                max_price=max_price,
+                page_count=page_count,
             )
 
             if not listings_response["success"]:
@@ -671,7 +681,10 @@ async def get_inserate_with_details(
                 detail_metrics,
                 detail_warnings,
             ) = await fetch_listing_details_concurrent(
-                browser_manager, listings, optimal_concurrency
+                browser_manager,
+                outbound_controller,
+                listings,
+                optimal_concurrency,
             )
 
             # Combine all metrics
@@ -790,6 +803,8 @@ async def get_inserate_with_details(
 
         except HTTPException:
             # Re-raise HTTP exceptions (already handled above)
+            raise
+        except OutboundControlError:
             raise
         except Exception as e:
             # Handle unexpected critical errors with comprehensive error handling

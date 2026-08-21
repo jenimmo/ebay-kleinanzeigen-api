@@ -5,12 +5,12 @@ Requires the server to be running:
   uvicorn main:app
 
 Run with:
-  pytest tests/test_inserat_live.py -v
+  pytest --run-live tests/test_inserat_live.py -v
 
 A real listing id is fetched first via /inserate-by-url to ensure the id is valid.
 Two fixture variants test the two accepted id formats:
-  - full URL segment  (adid-category_id-location_id) — no redirect, ~4s
-  - plain adid only                                  — server redirect,  ~7s
+  - full URL segment  (adid-category_id-location_id)
+  - plain adid only
 
 Deleted-ad tests use a known-expired ID. If that ID is ever recycled by
 Kleinanzeigen the deleted-ad tests will need a new ID.
@@ -18,6 +18,16 @@ Kleinanzeigen the deleted-ad tests will need a new ID.
 
 import pytest
 import httpx
+
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skip(
+        reason=(
+            "Historische synchrone Detailantworten; durch "
+            "test_persistent_jobs_live.py ersetzt"
+        )
+    ),
+]
 
 BASE_URL = "http://localhost:8000"
 
@@ -128,10 +138,11 @@ def test_full_segment_url_requested_matches_input(
     assert full_segment_response["data"]["url_requested"] == expected
 
 
-def test_full_segment_no_redirect(full_segment_response):
-    """With a full segment, no redirect occurs — both URLs are identical."""
+def test_full_segment_redirected_url_contains_id(full_segment_response):
+    """The final canonical URL remains a Kleinanzeigen ad URL for this ID."""
     data = full_segment_response["data"]
-    assert data["url_requested"] == data["url_redirected"]
+    assert data["id"] in data["url_redirected"]
+    assert data["url_redirected"].startswith("https://www.kleinanzeigen.de/s-anzeige/")
 
 
 def test_plain_adid_url_requested_is_short_form(plain_adid_response):

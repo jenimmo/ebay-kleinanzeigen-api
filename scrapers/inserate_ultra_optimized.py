@@ -7,16 +7,32 @@ the best possible performance for multi-page scraping operations.
 
 import asyncio
 import time
-import random
 import gc
+import logging
+import math
+import re
+import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, date, timedelta
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode, urlparse, urlunparse
 from typing import List, Dict, Any, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 
-from utils.browser import OptimizedPlaywrightManager
+from utils.browser import OptimizedPlaywrightManager, close_page_and_release_context
 from utils.performance import PageMetrics, PerformanceTracker
+from utils.url_security import (
+    install_safe_page_routing,
+    validate_kleinanzeigen_url_syntax,
+    validate_public_https_url,
+)
+from utils.outbound_control import (
+    OutboundControlError,
+    OutboundController,
+    OutboundNavigationTimeout,
+)
 from utils.error_handling import (
     ErrorLogger,
     WarningManager,
@@ -33,21 +49,168 @@ from utils.asyncio_optimizations import (
 )
 
 
+_KLEINANZEIGEN_TIMEZONE = ZoneInfo("Europe/Berlin")
+_logger = logging.getLogger(__name__)
+_BREADCRUMB_SELECTOR = ".breadcrump-summary"
+
+
+class SearchExtractionError(RuntimeError):
+    """A result card could not be represented without silently losing data."""
+
+
+@dataclass(frozen=True, slots=True)
+class SearchPageExecution:
+    """Framework-neutral result of exactly one persisted search work item."""
+
+    listings: tuple[dict[str, Any], ...]
+    total_results: int | None
+    total_pages: int | None
+    page_size: int | None
+    page_number: int
+    url: str
+    has_next_page: bool | None = None
+
+
+def _parse_breadcrumb_summary(
+    text: str,
+) -> tuple[int | None, int | None, int | None]:
+    """Return ``(total_results, total_pages, page_size)`` from page 1."""
+
+    match = re.search(r"(\d[\d.]*)\s*-\s*(\d[\d.]*)\s+von\s+([\d.]+)", text)
+    if match:
+        page_start = int(match.group(1).replace(".", ""))
+        page_end = int(match.group(2).replace(".", ""))
+        total = int(match.group(3).replace(".", ""))
+        page_size = page_end - page_start + 1
+        if page_start != 1 or page_size <= 0:
+            return total, None, None
+        return total, math.ceil(total / page_size) if total else 0, page_size
+
+    empty = re.search(r"\b0\s+(?:anzeigen|ergebnisse|treffer)\b", text.casefold())
+    if empty:
+        return 0, 0, None
+    return None, None, None
+
+
+def _inject_search_page(url: str, page_number: int) -> str:
+    """Replace an existing search page segment without changing its filters."""
+
+    if isinstance(page_number, bool) or not isinstance(page_number, int):
+        raise ValueError("page_number must be an integer")
+    if page_number < 1:
+        raise ValueError("page_number must be at least 1")
+
+    parsed = urlparse(url)
+    path = unquote(parsed.path)
+    segments = [
+        segment
+        for segment in path.strip("/").split("/")
+        if segment
+        and not re.fullmatch(r"s-seite:\d+", segment)
+        and not re.fullmatch(r"seite:\d+", segment)
+    ]
+    if page_number > 1:
+        filter_index = next(
+            (
+                index
+                for index, segment in enumerate(segments)
+                if re.match(r"^k?\d*c\d+", segment)
+            ),
+            None,
+        )
+        page_segment = f"seite:{page_number}"
+        if filter_index is None:
+            segments.append(f"s-seite:{page_number}")
+        else:
+            segments.insert(filter_index, page_segment)
+    return urlunparse(parsed._replace(path="/" + "/".join(segments)))
+
+
+def build_search_page_url(search: Mapping[str, Any], page_number: int) -> str:
+    """Build one canonical page URL from URL or structured search input."""
+
+    if not isinstance(search, Mapping):
+        raise ValueError("search must be a mapping")
+    if isinstance(page_number, bool) or not isinstance(page_number, int):
+        raise ValueError("page_number must be an integer")
+    if page_number < 1:
+        raise ValueError("page_number must be at least 1")
+
+    provided_url = search.get("url")
+    structured_keys = ("query", "location", "radius", "min_price", "max_price")
+    if provided_url is not None:
+        if not isinstance(provided_url, str) or not provided_url:
+            raise ValueError("url must be a non-empty string")
+        if any(search.get(key) is not None for key in structured_keys):
+            raise ValueError("url cannot be combined with structured search filters")
+        validate_kleinanzeigen_url_syntax(provided_url)
+        result = _inject_search_page(provided_url, page_number)
+        validate_kleinanzeigen_url_syntax(result)
+        return result
+
+    params: dict[str, str | int] = {}
+    for key, parameter in (("query", "keywords"), ("location", "locationStr")):
+        value = search.get(key)
+        if value is not None:
+            if not isinstance(value, str):
+                raise ValueError(f"{key} must be a string")
+            params[parameter] = value
+
+    for key in ("radius", "min_price", "max_price"):
+        value = search.get(key)
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{key} must be a non-negative integer")
+
+    radius = search.get("radius")
+    if radius is not None:
+        params["radius"] = radius
+    min_price = search.get("min_price")
+    max_price = search.get("max_price")
+    if min_price is not None or max_price is not None:
+        price_path = f"/preis:{min_price if min_price is not None else ''}:{max_price if max_price is not None else ''}"
+    else:
+        price_path = ""
+    query_string = f"?{urlencode(params)}" if params else ""
+    result = (
+        f"https://www.kleinanzeigen.de{price_path}/s-seite:{page_number}{query_string}"
+    )
+    validate_kleinanzeigen_url_syntax(result)
+    return result
+
+
+def _as_kleinanzeigen_datetime(value: datetime) -> datetime:
+    """Return an aware datetime in Kleinanzeigen's local timezone."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=_KLEINANZEIGEN_TIMEZONE)
+    return value.astimezone(_KLEINANZEIGEN_TIMEZONE)
+
+
+def _kleinanzeigen_today() -> date:
+    """Return today's date independently of the server/container timezone."""
+    return datetime.now(_KLEINANZEIGEN_TIMEZONE).date()
+
+
 def _page_has_old_listings(results: list, min_publish_date: datetime) -> bool:
     """Return True if any listing on this page was published before min_publish_date."""
+    cutoff = _as_kleinanzeigen_datetime(min_publish_date)
     for r in results:
         pub = r.get("published_at")
-        if pub and datetime.fromisoformat(pub) < min_publish_date:
+        if pub and _as_kleinanzeigen_datetime(datetime.fromisoformat(pub)) < cutoff:
             return True
     return False
 
 
 def _filter_by_min_publish_date(results: list, min_publish_date: datetime) -> list:
     """Remove listings published before min_publish_date. Null published_at entries are kept."""
+    cutoff = _as_kleinanzeigen_datetime(min_publish_date)
     out = []
     for r in results:
         pub = r.get("published_at")
-        if pub is None or datetime.fromisoformat(pub) >= min_publish_date:
+        if (
+            pub is None
+            or _as_kleinanzeigen_datetime(datetime.fromisoformat(pub)) >= cutoff
+        ):
             out.append(r)
     return out
 
@@ -65,7 +228,7 @@ def _parse_kleinanzeigen_date(text: str) -> Optional[str]:
     if not text:
         return None
     try:
-        today = date.today()
+        today = _kleinanzeigen_today()
         if text.startswith("Heute,"):
             h, m = map(int, text.split(",", 1)[1].strip().split(":"))
             return datetime(today.year, today.month, today.day, h, m).isoformat()
@@ -111,13 +274,18 @@ class UltraOptimizedScraper:
     - Intelligent concurrency control
     """
 
-    def __init__(self, browser_manager: OptimizedPlaywrightManager):
+    def __init__(
+        self,
+        browser_manager: OptimizedPlaywrightManager,
+        outbound_controller: OutboundController,
+    ):
         self.browser_manager = browser_manager
+        self.outbound_controller = outbound_controller
         self.task_manager = HighPerformanceTaskManager(
-            max_concurrent=browser_manager._semaphore._value
+            max_concurrent=browser_manager.max_concurrent
         )
         self.memory_processor = MemoryOptimizedProcessor(
-            max_concurrent=browser_manager._semaphore._value,
+            max_concurrent=browser_manager.max_concurrent,
             gc_threshold=50,  # More frequent GC for memory efficiency
         )
 
@@ -133,10 +301,9 @@ class UltraOptimizedScraper:
         to minimize memory usage.
         """
         try:
-            # Use more specific selector to reduce DOM traversal
-            items = await page.query_selector_all(
-                ".ad-listitem:not(.is-topad):not(.badge-hint-pro-small-srp) article[data-adid]"
-            )
+            # Promoted/Top/Pro cards are real requested results too. Persisted
+            # jobs deduplicate them by canonical ad ID across cards and pages.
+            items = await page.query_selector_all(".ad-listitem article[data-adid]")
 
             results = []
 
@@ -168,25 +335,64 @@ class UltraOptimizedScraper:
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-    async def _extract_single_ad(self, article) -> Dict[str, Any]:
+    async def extract_ads_for_job(self, page) -> List[Dict[str, Any]]:
+        """Strictly extract every visible result card for a persisted job.
+
+        A malformed card or failed DOM read raises ``SearchExtractionError``;
+        it is never converted into a shorter, apparently successful result.
+        Duplicate promoted/organic representations are collapsed by ad ID in
+        their first-seen order.
+        """
+
+        try:
+            items = await page.query_selector_all(".ad-listitem article[data-adid]")
+            extracted: list[dict[str, Any]] = []
+            for offset in range(0, len(items), 10):
+                batch = items[offset : offset + 10]
+                values = await asyncio.gather(
+                    *(self._extract_single_ad(item, strict=True) for item in batch)
+                )
+                extracted.extend(values)
+
+            unique: dict[str, dict[str, Any]] = {}
+            for listing in extracted:
+                listing_id = str(listing["adid"])
+                unique.setdefault(listing_id, listing)
+            return list(unique.values())
+        except SearchExtractionError:
+            raise
+        except Exception as exc:
+            raise SearchExtractionError("search result extraction failed") from exc
+
+    async def _extract_single_ad(
+        self, article, *, strict: bool = False
+    ) -> Dict[str, Any] | None:
         """Extract data from a single ad article element."""
         try:
             data_adid = await article.get_attribute("data-adid")
             data_href = await article.get_attribute("data-href")
 
             if not data_adid or not data_href:
+                if strict:
+                    raise SearchExtractionError(
+                        "search result card is missing its canonical ID or URL"
+                    )
                 return None
 
             title_task = self._get_text_content(
-                article, "h2.text-module-begin a.ellipsis"
+                article, "h2.text-module-begin a.ellipsis", strict=strict
             )
             price_task = self._get_text_content(
-                article, "p.aditem-main--middle--price-shipping--price"
+                article,
+                "p.aditem-main--middle--price-shipping--price",
+                strict=strict,
             )
             desc_task = self._get_text_content(
-                article, "p.aditem-main--middle--description"
+                article, "p.aditem-main--middle--description", strict=strict
             )
-            date_task = self._get_text_content(article, ".aditem-main--top--right")
+            date_task = self._get_text_content(
+                article, ".aditem-main--top--right", strict=strict
+            )
 
             location_task = article.evaluate(
                 """
@@ -234,7 +440,7 @@ class UltraOptimizedScraper:
                 desc_task,
                 date_task,
                 location_task,
-                return_exceptions=True,
+                return_exceptions=not strict,
             )
 
             if isinstance(price_text, str):
@@ -250,6 +456,15 @@ class UltraOptimizedScraper:
             published_at = _parse_kleinanzeigen_date(
                 date_raw if isinstance(date_raw, str) else ""
             )
+            if (
+                strict
+                and isinstance(date_raw, str)
+                and date_raw.strip()
+                and not published_at
+            ):
+                raise SearchExtractionError(
+                    "search result card contains an unparseable publication date"
+                )
 
             location_text = _clean_location_text(
                 location_raw if isinstance(location_raw, str) else ""
@@ -267,10 +482,18 @@ class UltraOptimizedScraper:
                 "published_at": published_at,
             }
 
-        except Exception:
+        except SearchExtractionError:
+            raise
+        except Exception as exc:
+            if strict:
+                raise SearchExtractionError(
+                    "search result card extraction failed"
+                ) from exc
             return None
 
-    async def _get_text_content(self, parent_element, selector: str) -> str:
+    async def _get_text_content(
+        self, parent_element, selector: str, *, strict: bool = False
+    ) -> str:
         """Efficiently get text content from an element."""
         try:
             element = await parent_element.query_selector(selector)
@@ -278,7 +501,126 @@ class UltraOptimizedScraper:
                 return await element.inner_text()
             return ""
         except Exception:
+            if strict:
+                raise
             return ""
+
+    async def execute_search_page(
+        self,
+        *,
+        search: Mapping[str, Any],
+        page_number: int,
+        is_retry: bool = False,
+        page_setup_timeout_seconds: float = 30.0,
+        extraction_timeout_seconds: float = 30.0,
+        cleanup_timeout_seconds: float = 30.0,
+    ) -> SearchPageExecution:
+        """Execute one scheduler search item without a request-local queue."""
+
+        for name, value in (
+            ("page_setup_timeout_seconds", page_setup_timeout_seconds),
+            ("extraction_timeout_seconds", extraction_timeout_seconds),
+            ("cleanup_timeout_seconds", cleanup_timeout_seconds),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a finite positive number")
+
+        url = build_search_page_url(search, page_number)
+        if search.get("url") is not None:
+            await validate_public_https_url(url, require_kleinanzeigen_host=True)
+
+        context = None
+        page = None
+
+        async def create_page():
+            nonlocal context, page
+            async with asyncio.timeout(page_setup_timeout_seconds):
+                context = await self.browser_manager.get_context()
+                page = await context.new_page()
+                await install_safe_page_routing(page)
+            return page
+
+        async def extract(navigated_page, response) -> SearchPageExecution:
+            async with asyncio.timeout(extraction_timeout_seconds):
+                status = getattr(response, "status", None)
+                if isinstance(status, int) and 400 <= status < 500:
+                    raise SearchExtractionError(
+                        "search page returned an unexpected client-error status"
+                    )
+                if isinstance(status, int) and status >= 500:
+                    raise RuntimeError("search page returned a transient server error")
+                listings = await self.extract_ads_for_job(navigated_page)
+                breadcrumb_text = ""
+                breadcrumb = await navigated_page.query_selector(_BREADCRUMB_SELECTOR)
+                if breadcrumb is not None:
+                    breadcrumb_text = await breadcrumb.inner_text()
+                total_results, total_pages, page_size = _parse_breadcrumb_summary(
+                    breadcrumb_text
+                )
+
+                min_publish_date = search.get("min_publish_date")
+                reached_publish_date_cutoff = False
+                if min_publish_date is not None:
+                    if isinstance(min_publish_date, str):
+                        min_publish_date = datetime.fromisoformat(min_publish_date)
+                    if not isinstance(min_publish_date, datetime):
+                        raise ValueError(
+                            "min_publish_date must be an ISO timestamp or datetime"
+                        )
+                    reached_publish_date_cutoff = _page_has_old_listings(
+                        listings, min_publish_date
+                    )
+                    listings = _filter_by_min_publish_date(listings, min_publish_date)
+
+                has_next_page: bool | None = None
+                if total_pages is not None:
+                    has_next_page = page_number < total_pages
+                else:
+                    next_link = await navigated_page.query_selector(
+                        'a[rel="next"], .pagination-next:not(.is-disabled) a'
+                    )
+                    if next_link is not None:
+                        has_next_page = True
+                    elif not listings:
+                        has_next_page = False
+                if reached_publish_date_cutoff:
+                    # Kleinanzeigen orders these search pages newest-first. Once
+                    # the requested cutoff is crossed, later pages must not be
+                    # fetched merely because the unfiltered search reports them.
+                    has_next_page = False
+
+                return SearchPageExecution(
+                    listings=tuple(listings),
+                    total_results=total_results,
+                    total_pages=total_pages,
+                    page_size=page_size,
+                    page_number=page_number,
+                    url=url,
+                    has_next_page=has_next_page,
+                )
+
+        async def cleanup(_navigated_page) -> None:
+            await close_page_and_release_context(
+                page,
+                context,
+                self.browser_manager,
+                timeout_seconds=cleanup_timeout_seconds,
+            )
+
+        return await self.outbound_controller.run_navigation(
+            create_page,
+            url,
+            extract,
+            cleanup=cleanup,
+            is_retry=is_retry,
+            wait_until="domcontentloaded",
+            wait_for_circuit=False,
+        )
 
     @monitor_slow_coroutines(
         threshold=2.0,
@@ -290,7 +632,7 @@ class UltraOptimizedScraper:
         self,
         url: str,
         page_num: int,
-        retry_count: int = 2,
+        retry_count: int | None = None,
         extra_selectors: Dict[str, str] = None,
     ) -> Tuple[List[Dict], PageMetrics, Dict[str, str]]:
         """
@@ -304,6 +646,9 @@ class UltraOptimizedScraper:
         """
         logger = ErrorLogger(f"ultra_scraper_page_{page_num}")
         logger.logger.info(f"[OVERVIEW] Fetching page {page_num}: {url}")
+        effective_retry_count = self.outbound_controller.bounded_retry_count(
+            retry_count
+        )
 
         with error_handling_context(
             operation="ultra_fetch_page", page_number=page_num, url=url, logger=logger
@@ -311,17 +656,28 @@ class UltraOptimizedScraper:
             start_time = time.time()
             last_error = None
 
-            for attempt in range(retry_count + 1):
+            for attempt in range(effective_retry_count + 1):
                 context = None
                 page = None
 
                 try:
-                    # Get context from pool (optimized)
-                    context = await self.browser_manager.get_context()
-                    page = await context.new_page()
 
-                    # Optimized page loading with minimal wait
-                    await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                    async def create_page():
+                        nonlocal context, page
+                        context = await self.browser_manager.get_context()
+                        page = await context.new_page()
+                        await install_safe_page_routing(page)
+                        return page
+
+                    # Admission happens before allocating a browser context, so
+                    # API overload is bounded by the controller queue itself.
+                    page, _ = await self.outbound_controller.navigate_with_page(
+                        create_page,
+                        url,
+                        is_retry=attempt > 0,
+                        timeout_ms=60_000,
+                        wait_until="domcontentloaded",
+                    )
 
                     # Wait for essential content only
                     try:
@@ -359,6 +715,16 @@ class UltraOptimizedScraper:
 
                     return results, metrics, extras
 
+                except OutboundNavigationTimeout as exc:
+                    last_error = exc
+                    if attempt < effective_retry_count:
+                        await self.outbound_controller.wait_before_retry(attempt)
+                        continue
+                    raise
+                except OutboundControlError:
+                    # Queue pressure and block signals are process-global policy
+                    # decisions and must never be hidden or locally retried.
+                    raise
                 except Exception as e:
                     last_error = e
 
@@ -375,12 +741,11 @@ class UltraOptimizedScraper:
                     )
 
                     # Decide on retry
-                    if attempt < retry_count and structured_error.should_retry(
-                        retry_count
+                    if (
+                        attempt < effective_retry_count
+                        and structured_error.should_retry(effective_retry_count)
                     ):
-                        # Exponential backoff with jitter (optimized)
-                        wait_time = min((2**attempt) + random.uniform(0, 0.5), 5.0)
-                        await asyncio.sleep(wait_time)
+                        await self.outbound_controller.wait_before_retry(attempt)
                         continue
 
                     # All retries exhausted
@@ -388,10 +753,12 @@ class UltraOptimizedScraper:
 
                 finally:
                     # Cleanup resources immediately
-                    if page:
-                        await page.close()
-                    if context:
-                        await self.browser_manager.release_context(context)
+                    await close_page_and_release_context(
+                        page,
+                        context,
+                        self.browser_manager,
+                        suppress_errors=sys.exception() is not None,
+                    )
 
             # Create failed metrics
             error_msg = str(last_error) if last_error else "Unknown error"
@@ -401,7 +768,7 @@ class UltraOptimizedScraper:
                 start_time=start_time,
                 end_time=time.time(),
                 success=False,
-                retry_count=retry_count,
+                retry_count=attempt,
                 error_message=error_msg,
                 results_count=0,
             )
@@ -469,57 +836,37 @@ class UltraOptimizedScraper:
             # Use memory-optimized batch processing
             page_numbers = list(range(1, page_count + 1))
 
-            # Process in optimal batches to balance speed and memory
-            batch_size = min(8, page_count)  # Optimal batch size based on testing
             all_results = []
             all_metrics = []
             stop_early = False
 
-            for i in range(0, len(page_numbers), batch_size):
+            # Register one search page at a time. Different API requests still
+            # interleave fairly through the process-global FIFO controller, while
+            # one request can no longer occupy the queue with an eight-page burst.
+            for page_num in page_numbers:
                 if stop_early:
                     break
 
-                batch_pages = page_numbers[i : i + batch_size]
+                result = await create_page_task(page_num)
+                page_results, page_metrics, _ = result
 
-                # Create tasks for this batch
-                batch_tasks = [create_page_task(page_num) for page_num in batch_pages]
-
-                # Execute batch with task manager
-                batch_results = await self.task_manager.gather_with_limit(
-                    batch_tasks, return_exceptions=True
-                )
-
-                # Process batch results
-                for result in batch_results:
-                    if isinstance(result, Exception):
-                        logger.log_error(
-                            ErrorClassifier.classify_exception(
-                                result,
-                                ErrorContext(operation="batch_processing"),
-                                "batch_execution",
-                            )
-                        )
-                        continue
-
-                    page_results, page_metrics, _ = result
-
-                    if min_publish_date and _page_has_old_listings(
+                if min_publish_date and _page_has_old_listings(
+                    page_results, min_publish_date
+                ):
+                    page_results = _filter_by_min_publish_date(
                         page_results, min_publish_date
-                    ):
-                        page_results = _filter_by_min_publish_date(
-                            page_results, min_publish_date
-                        )
-                        stop_early = True
+                    )
+                    stop_early = True
 
-                    all_results.extend(page_results)
-                    all_metrics.append(page_metrics)
-                    tracker.add_page_metric(page_metrics)
+                all_results.extend(page_results)
+                all_metrics.append(page_metrics)
+                tracker.add_page_metric(page_metrics)
 
-                # Memory cleanup between batches
+                # Memory cleanup between pages
                 gc.collect()
 
             # Set performance metrics
-            tracker.set_concurrent_level(batch_size)
+            tracker.set_concurrent_level(1)
             browser_metrics = self.browser_manager.get_performance_metrics()
             tracker.set_browser_contexts_used(
                 browser_metrics["contexts_in_use"] + browser_metrics["contexts_in_pool"]
@@ -566,7 +913,10 @@ class UltraOptimizedScraper:
 
             # Prepare ultra-comprehensive response
             response = {
-                "success": True,
+                # A successfully loaded empty result page is still a valid
+                # search. Only the page metric, not the result count, decides
+                # whether the outbound operation itself succeeded.
+                "success": successful_pages > 0,
                 "results": all_results,
                 "unique_results": len(all_results),
                 "time_taken": round(request_metrics.total_time, 3),
@@ -607,14 +957,43 @@ class UltraOptimizedScraper:
 # Factory function for easy integration
 async def create_ultra_optimized_scraper(
     browser_manager: OptimizedPlaywrightManager,
+    outbound_controller: OutboundController,
 ) -> UltraOptimizedScraper:
     """Create and initialize an ultra-optimized scraper."""
-    return UltraOptimizedScraper(browser_manager)
+    return UltraOptimizedScraper(browser_manager, outbound_controller)
+
+
+async def execute_search_page(
+    browser_manager: OptimizedPlaywrightManager,
+    outbound_controller: OutboundController,
+    *,
+    search: Mapping[str, Any],
+    page_number: int,
+    is_retry: bool = False,
+    page_setup_timeout_seconds: float = 30.0,
+    extraction_timeout_seconds: float = 30.0,
+    cleanup_timeout_seconds: float = 30.0,
+) -> SearchPageExecution:
+    """Convenience adapter for one persistent scheduler search task."""
+
+    scraper = await create_ultra_optimized_scraper(browser_manager, outbound_controller)
+    try:
+        return await scraper.execute_search_page(
+            search=search,
+            page_number=page_number,
+            is_retry=is_retry,
+            page_setup_timeout_seconds=page_setup_timeout_seconds,
+            extraction_timeout_seconds=extraction_timeout_seconds,
+            cleanup_timeout_seconds=cleanup_timeout_seconds,
+        )
+    finally:
+        await scraper.cleanup()
 
 
 # Convenience function for direct usage
 async def ultra_optimized_scrape_inserate(
     browser_manager: OptimizedPlaywrightManager,
+    outbound_controller: OutboundController,
     query: str = None,
     location: str = None,
     radius: int = None,
@@ -633,7 +1012,7 @@ async def ultra_optimized_scrape_inserate(
     - More reliable error handling
     - Enhanced monitoring and metrics
     """
-    scraper = await create_ultra_optimized_scraper(browser_manager)
+    scraper = await create_ultra_optimized_scraper(browser_manager, outbound_controller)
 
     try:
         return await scraper.ultra_optimized_scrape(
@@ -646,4 +1025,7 @@ async def ultra_optimized_scrape_inserate(
             min_publish_date=min_publish_date,
         )
     finally:
-        await scraper.cleanup()
+        try:
+            await scraper.cleanup()
+        except Exception:
+            _logger.warning("Ultra scraper cleanup reported an error")

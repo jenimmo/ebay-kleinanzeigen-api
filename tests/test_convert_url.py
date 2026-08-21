@@ -186,3 +186,37 @@ def test_autos_full_filters():
     assert ua["autos.shift_s"] == "automatik"
     assert ua["autos.typ_s"] == "(kombi,suv)"
     assert "autos.km_i" in ua
+
+
+def test_closed_year_range():
+    data = post(
+        "https://www.kleinanzeigen.de/s-autos/volkswagen/c216+autos.ez_i:2008%2C2024"
+    )
+
+    assert data["unmapped"]["year_from"] == 2008
+    assert data["unmapped"]["year_to"] == 2024
+
+
+def test_upper_bounded_year_range():
+    data = post(
+        "https://www.kleinanzeigen.de/s-autos/volkswagen/c216+autos.ez_i:%2C2024"
+    )
+
+    assert "year_from" not in data["unmapped"]
+    assert data["unmapped"]["year_to"] == 2024
+
+
+def test_malformed_numeric_filters_return_controlled_400():
+    malformed_urls = [
+        "https://www.kleinanzeigen.de/s-anzeige:angebote?radius=weit",
+        "https://www.kleinanzeigen.de/s-autos/seite:viele/c216",
+        "https://www.kleinanzeigen.de/s-autos/preis:billig:1000/c216",
+        "https://www.kleinanzeigen.de/s-autos/preis:1000:2000:3000/c216",
+        "https://www.kleinanzeigen.de/s-autos/c216+autos.ez_i:2008%2Cspaeter",
+        "https://www.kleinanzeigen.de/s-autos/c216+autos.ez_i:2024%2C2008",
+    ]
+
+    for url in malformed_urls:
+        response = client.post("/convert-url", json={"url": url})
+        assert response.status_code == 400, url
+        assert response.json() == {"detail": "Malformed URL filter"}

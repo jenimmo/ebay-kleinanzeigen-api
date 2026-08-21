@@ -1,11 +1,16 @@
 import asyncio
 import time
-import random
+import sys
 from urllib.parse import urlencode
 
 from fastapi import HTTPException
 
-from utils.browser import PlaywrightManager, OptimizedPlaywrightManager
+from utils.browser import (
+    OptimizedPlaywrightManager,
+    PlaywrightManager,
+    close_page_and_release_context,
+    close_playwright_managed_page,
+)
 from utils.performance import PageMetrics, track_page_performance
 from utils.error_handling import (
     ErrorClassifier,
@@ -14,6 +19,11 @@ from utils.error_handling import (
     ErrorContext,
     ErrorSeverity,
     error_handling_context,
+)
+from utils.outbound_control import (
+    OutboundControlError,
+    OutboundController,
+    OutboundNavigationTimeout,
 )
 
 
@@ -65,21 +75,39 @@ async def get_ads(page):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-async def fetch_page(browser_manager: PlaywrightManager, url: str):
-    page = await browser_manager.new_context_page()
+async def fetch_page(
+    browser_manager: PlaywrightManager,
+    outbound_controller: OutboundController,
+    url: str,
+):
+    page = None
+
+    async def create_page():
+        nonlocal page
+        page = await browser_manager.new_context_page()
+        return page
+
     try:
-        await page.goto(url, timeout=120000)
+        page, _ = await outbound_controller.navigate_with_page(
+            create_page, url, timeout_ms=120_000
+        )
         await page.wait_for_load_state("networkidle")
         return await get_ads(page)
     finally:
-        await browser_manager.close_page(page)
+        if page:
+            await close_playwright_managed_page(
+                page,
+                browser_manager,
+                suppress_errors=sys.exception() is not None,
+            )
 
 
 async def optimized_fetch_page(
     browser_manager: OptimizedPlaywrightManager,
+    outbound_controller: OutboundController,
     url: str,
     page_num: int,
-    retry_count: int = 2,
+    retry_count: int | None = None,
     logger: ErrorLogger = None,
 ) -> tuple[list, PageMetrics]:
     """
@@ -89,7 +117,7 @@ async def optimized_fetch_page(
         browser_manager: OptimizedPlaywrightManager instance
         url: URL to fetch
         page_num: Page number for tracking
-        retry_count: Maximum number of retries (default: 2)
+        retry_count: Optional caller cap; the shared controller budget is authoritative
         logger: Optional error logger instance
 
     Returns:
@@ -97,6 +125,7 @@ async def optimized_fetch_page(
     """
     if logger is None:
         logger = ErrorLogger()
+    effective_retry_count = outbound_controller.bounded_retry_count(retry_count)
 
     with error_handling_context(
         operation="fetch_page", page_number=page_num, url=url, logger=logger
@@ -104,17 +133,27 @@ async def optimized_fetch_page(
         async with track_page_performance(page_num, url) as tracker:
             last_structured_error = None
 
-            for attempt in range(retry_count + 1):  # +1 for initial attempt
+            for attempt in range(effective_retry_count + 1):
                 try:
                     # Use semaphore-controlled execution
                     async def fetch_operation():
-                        context = await browser_manager.get_context()
+                        context = None
                         page = None
                         try:
-                            page = await context.new_page()
+
+                            async def create_page():
+                                nonlocal context, page
+                                context = await browser_manager.get_context()
+                                page = await context.new_page()
+                                return page
 
                             # Navigate to page with timeout
-                            await page.goto(url, timeout=120000)
+                            page, _ = await outbound_controller.navigate_with_page(
+                                create_page,
+                                url,
+                                is_retry=attempt > 0,
+                                timeout_ms=120_000,
+                            )
                             await page.wait_for_load_state("networkidle")
 
                             # Extract ads from page
@@ -133,14 +172,14 @@ async def optimized_fetch_page(
                             return results
 
                         finally:
-                            if page:
-                                await page.close()
-                            await browser_manager.release_context(context)
+                            await close_page_and_release_context(
+                                page,
+                                context,
+                                browser_manager,
+                                suppress_errors=sys.exception() is not None,
+                            )
 
-                    # Execute with concurrency control
-                    results = await browser_manager.execute_with_semaphore(
-                        fetch_operation()
-                    )
+                    results = await fetch_operation()
                     tracker.set_retry_count(attempt)
 
                     # Create enhanced metrics with error categorization
@@ -150,6 +189,13 @@ async def optimized_fetch_page(
 
                     return results, metrics
 
+                except OutboundNavigationTimeout:
+                    if attempt < effective_retry_count:
+                        await outbound_controller.wait_before_retry(attempt)
+                        continue
+                    raise
+                except OutboundControlError:
+                    raise
                 except Exception as e:
                     # Classify and handle the error
                     error_ctx.context.retry_attempt = attempt
@@ -159,21 +205,19 @@ async def optimized_fetch_page(
                     tracker.set_retry_count(attempt)
 
                     # Check if we should retry based on error classification
-                    if attempt < retry_count and structured_error.should_retry(
-                        retry_count
+                    if (
+                        attempt < effective_retry_count
+                        and structured_error.should_retry(effective_retry_count)
                     ):
-                        # Exponential backoff with jitter
-                        wait_time = (2**attempt) + random.uniform(0, 1)
-
                         # Add warning about retry attempt
                         error_ctx.add_warning(
-                            f"Retrying page {page_num} after {structured_error.category.value} error (attempt {attempt + 1}/{retry_count + 1})",
+                            f"Retrying page {page_num} after {structured_error.category.value} error (attempt {attempt + 1}/{effective_retry_count + 1})",
                             ErrorSeverity.MEDIUM,
                             affected_items=[f"page_{page_num}"],
-                            impact_description=f"Temporary delay of {wait_time:.1f}s before retry",
+                            impact_description="Temporary delay before retry",
                         )
 
-                        await asyncio.sleep(wait_time)
+                        await outbound_controller.wait_before_retry(attempt)
                         continue
 
                     # All retries exhausted or non-recoverable error
@@ -203,6 +247,7 @@ async def optimized_fetch_page(
 
 async def get_inserate_klaz(
     browser_manager: PlaywrightManager,
+    outbound_controller: OutboundController,
     query: str = None,
     location: str = None,
     radius: int = None,
@@ -236,22 +281,26 @@ async def get_inserate_klaz(
     # Construct the full URL and get it
     search_url = base_url + search_path + ("?" + urlencode(params) if params else "")
 
-    tasks = []
+    results_from_pages = []
     for i in range(1, page_count + 1):
         url = search_url.format(page=i)
-        tasks.append(fetch_page(browser_manager, url))
+        results_from_pages.append(
+            await fetch_page(browser_manager, outbound_controller, url)
+        )
 
     try:
-        results_from_pages = await asyncio.gather(*tasks)
         # Flatten the list of lists into a single list
         all_results = [item for sublist in results_from_pages for item in sublist]
         return all_results
+    except OutboundControlError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 async def get_inserate_klaz_optimized(
     browser_manager: OptimizedPlaywrightManager,
+    outbound_controller: OutboundController,
     query: str = None,
     location: str = None,
     radius: int = None,
@@ -317,10 +366,18 @@ async def get_inserate_klaz_optimized(
         tasks = []
         for i in range(1, page_count + 1):
             url = search_url.format(page=i)
-            tasks.append(optimized_fetch_page(browser_manager, url, i, logger=logger))
+            tasks.append(
+                optimized_fetch_page(
+                    browser_manager,
+                    outbound_controller,
+                    url,
+                    i,
+                    logger=logger,
+                )
+            )
 
         # Set concurrent level for metrics
-        tracker.set_concurrent_level(min(page_count, browser_manager._semaphore._value))
+        tracker.set_concurrent_level(min(page_count, browser_manager.max_concurrent))
 
         try:
             # Execute all tasks concurrently with controlled concurrency
@@ -333,6 +390,8 @@ async def get_inserate_klaz_optimized(
             total_warnings = 0
 
             for i, result in enumerate(results_and_metrics):
+                if isinstance(result, OutboundControlError):
+                    raise result
                 if isinstance(result, Exception):
                     # Handle exceptions that weren't caught by optimized_fetch_page
                     failed_pages += 1
@@ -490,6 +549,8 @@ async def get_inserate_klaz_optimized(
 
             return response
 
+        except OutboundControlError:
+            raise
         except Exception as e:
             # Handle unexpected critical errors
             structured_error = error_ctx.handle_exception(e, "multi_page_scrape")

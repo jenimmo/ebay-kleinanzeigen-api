@@ -11,8 +11,17 @@ import re
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 
+from fastapi import HTTPException
+
 from utils.browser import OptimizedPlaywrightManager
 from utils.performance import PerformanceTracker
+from utils.outbound_control import OutboundController
+from utils.url_security import (
+    MAX_SCRAPE_PAGES,
+    UnsafeOutboundUrlError,
+    validate_kleinanzeigen_url_syntax,
+    validate_public_https_url,
+)
 from scrapers.inserate_ultra_optimized import (
     create_ultra_optimized_scraper,
     _page_has_old_listings,
@@ -20,6 +29,7 @@ from scrapers.inserate_ultra_optimized import (
 )
 
 _TOTAL_RESULTS_SELECTOR = {"breadcrump_summary": ".breadcrump-summary"}
+SCRAPE_TOTAL_TIMEOUT_SECONDS = 180.0
 
 
 def inject_page(url: str, page_num: int) -> str:
@@ -85,8 +95,51 @@ def _parse_breadcrumb(breadcrump_text: str) -> Tuple[Optional[int], Optional[int
 
 async def scrape_by_url(
     browser_manager: OptimizedPlaywrightManager,
+    outbound_controller: OutboundController,
     base_url: str,
     max_pages: int = 1,
+    min_publish_date: datetime = None,
+) -> Dict[str, Any]:
+    """Validate and scrape a Kleinanzeigen URL within a fixed request budget."""
+    if not isinstance(max_pages, int) or not 1 <= max_pages <= MAX_SCRAPE_PAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_pages must be between 1 and {MAX_SCRAPE_PAGES}",
+        )
+
+    try:
+        validate_kleinanzeigen_url_syntax(base_url)
+    except UnsafeOutboundUrlError as exc:
+        raise HTTPException(status_code=400, detail="URL is not allowed") from exc
+
+    try:
+        async with asyncio.timeout(SCRAPE_TOTAL_TIMEOUT_SECONDS):
+            # Resolve once before acquiring scarce browser capacity. The page-level
+            # route guard resolves again immediately before Chromium sends the
+            # navigation and every subsequent redirect or subresource request.
+            await validate_public_https_url(base_url, require_kleinanzeigen_host=True)
+            return await _scrape_by_url_within_budget(
+                browser_manager=browser_manager,
+                outbound_controller=outbound_controller,
+                base_url=base_url,
+                max_pages=max_pages,
+                min_publish_date=min_publish_date,
+            )
+    except UnsafeOutboundUrlError as exc:
+        raise HTTPException(
+            status_code=400, detail="URL could not be safely resolved"
+        ) from exc
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=504, detail="Scraping time budget exceeded"
+        ) from exc
+
+
+async def _scrape_by_url_within_budget(
+    browser_manager: OptimizedPlaywrightManager,
+    outbound_controller: OutboundController,
+    base_url: str,
+    max_pages: int,
     min_publish_date: datetime = None,
 ) -> Dict[str, Any]:
     """Scrape up to max_pages pages starting from base_url.
@@ -94,21 +147,19 @@ async def scrape_by_url(
     If min_publish_date is set, stops fetching once a page contains listings
     older than that date and trims those listings from the final results.
     """
-    scraper = await create_ultra_optimized_scraper(browser_manager)
+    scraper = await create_ultra_optimized_scraper(browser_manager, outbound_controller)
     tracker = PerformanceTracker()
     tracker.start_request()
 
     try:
-        batch_size = min(8, max_pages)
         all_results = []
         all_metrics = []
         total_results: Optional[int] = None
         actual_max_pages: Optional[int] = None
         _log = logging.getLogger("scrape_by_url")
 
-        # Fetch pages sequentially — Kleinanzeigen blocks concurrent requests
-        # from the same IP even with staggered starts.
-        # A short delay between pages further reduces bot-detection risk.
+        # Fetch pages sequentially. The shared outbound controller applies the
+        # process-wide start interval across this and every other API request.
         for page_num in range(1, max_pages + 1):
             # After page 1 we know the real page count — stop before wasting requests.
             if actual_max_pages is not None and page_num > actual_max_pages:
@@ -119,8 +170,6 @@ async def scrape_by_url(
                 )
                 break
 
-            if page_num > 1:
-                await asyncio.sleep(2)
             result = await scraper.ultra_optimized_fetch_page(
                 inject_page(base_url, page_num),
                 page_num,
@@ -169,7 +218,7 @@ async def scrape_by_url(
             gc.collect()
 
         pages_attempted = len(all_metrics)
-        tracker.set_concurrent_level(batch_size)
+        tracker.set_concurrent_level(1)
         browser_metrics = browser_manager.get_performance_metrics()
         tracker.set_browser_contexts_used(
             browser_metrics["contexts_in_use"] + browser_metrics["contexts_in_pool"]
@@ -183,7 +232,9 @@ async def scrape_by_url(
         )
 
         response = {
-            "success": True,
+            # Keep an empty but successfully loaded search distinguishable
+            # from a browser/network failure on every attempted page.
+            "success": successful_pages > 0,
             "results": all_results,
             "unique_results": len(all_results),
             "time_taken": round(request_metrics.total_time, 3),
@@ -203,4 +254,7 @@ async def scrape_by_url(
 
         return response
     finally:
-        await scraper.cleanup()
+        try:
+            await scraper.cleanup()
+        except Exception:
+            logging.getLogger(__name__).warning("URL scraper cleanup reported an error")

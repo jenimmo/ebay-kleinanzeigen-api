@@ -1,9 +1,13 @@
+import asyncio
+from dataclasses import dataclass
 from fastapi import HTTPException
 from libs.websites import kleinanzeigen as lib
+import math
 import re
+import sys
 import time
 from datetime import datetime, timezone
-from utils.browser import OptimizedPlaywrightManager
+from utils.browser import OptimizedPlaywrightManager, close_page_and_release_context
 from utils.performance import PageMetrics
 from utils.error_handling import (
     WarningManager,
@@ -11,8 +15,27 @@ from utils.error_handling import (
     ErrorSeverity,
     error_handling_context,
 )
+from utils.input_validation import normalize_listing_id, sanitize_log_value
+from utils.url_security import install_safe_page_routing
+from utils.outbound_control import (
+    OutboundControlError,
+    OutboundController,
+    OutboundNavigationTimeout,
+)
 
 _AD_URL_PREFIX = "https://www.kleinanzeigen.de/s-anzeige/"
+
+
+class DetailExtractionError(RuntimeError):
+    """A detail page loaded but could not be represented reliably."""
+
+
+@dataclass(frozen=True, slots=True)
+class DetailPageExecution:
+    """Framework-neutral result of one persisted detail work item."""
+
+    status: str
+    data: dict
 
 
 def _deleted_response(url_requested: str, url_redirected: str) -> dict:
@@ -47,130 +70,206 @@ def _deleted_response(url_requested: str, url_redirected: str) -> dict:
     }
 
 
-async def get_inserate_details(url: str, page):
+async def _extract_inserat_details_from_page(url: str, page) -> dict:
+    """Extract one already navigated detail page without owning resources."""
+
+    final_url = page.url
+    if not final_url.startswith(_AD_URL_PREFIX):
+        return _deleted_response(url, final_url)
+    if await page.query_selector("#srchrslt-adexpired"):
+        return _deleted_response(url, final_url)
+
     try:
-        await page.goto(url, timeout=120000)
-        final_url = page.url
+        await page.wait_for_selector("#viewad-cntr-num", state="visible", timeout=2500)
+    except Exception as exc:
+        print(f"[WARNING] Views element did not appear within 5 seconds: {exc}")
 
-        # Redirect away from the ad URL means the ad is gone
-        if not final_url.startswith(_AD_URL_PREFIX):
-            return _deleted_response(url, final_url)
+    ad_id = await lib.get_element_content(
+        page,
+        "#viewad-ad-id-box > ul > li:nth-child(2)",
+        default="[ERROR] Ad ID not found",
+    )
+    categories = [
+        category.strip()
+        for category in await lib.get_elements_content(page, ".breadcrump-link")
+        if category.strip()
+    ]
+    title = await lib.get_element_content(
+        page, "#viewad-title", default="[ERROR] Title not found"
+    )
 
-        # Kleinanzeigen expired-ad page (alternative to redirect)
-        if await page.query_selector("#srchrslt-adexpired"):
-            return _deleted_response(url, final_url)
-
-        try:
-            await page.wait_for_selector(
-                "#viewad-cntr-num", state="visible", timeout=2500
-            )
-        except Exception as e:
-            print(f"[WARNING] Views element did not appear within 5 seconds: {e}")
-
-        ad_id = await lib.get_element_content(
-            page,
-            "#viewad-ad-id-box > ul > li:nth-child(2)",
-            default="[ERROR] Ad ID not found",
-        )
-        categories = [
-            cat.strip()
-            for cat in await lib.get_elements_content(page, ".breadcrump-link")
-            if cat.strip()
-        ]
-        title = await lib.get_element_content(
-            page, "#viewad-title", default="[ERROR] Title not found"
-        )
-
-        # Extract status from title element
-        status = "active"  # Default status
-        title_element = await page.query_selector("#viewad-title")
-        if title_element:
-            title_text = await title_element.inner_text()
-
-            # Check for specific status indicators in the title text
-            if "Verkauft" in title_text:
-                status = "sold"
-            elif "Reserviert •" in title_text:
-                status = "reserved"
-            elif "Gelöscht •" in title_text:
-                status = "deleted"
-
-            # Additional check for sold class
-            title_classes = await title_element.get_attribute("class")
-            if title_classes and "is-sold" in title_classes:
-                status = "sold"
-
-        # Final check for sold status in the page content
-        sold_badge = await page.query_selector(".badge-sold")
-        if sold_badge:
+    status = "active"
+    title_element = await page.query_selector("#viewad-title")
+    if title_element:
+        title_text = await title_element.inner_text()
+        if "Verkauft" in title_text:
             status = "sold"
+        elif "Reserviert •" in title_text:
+            status = "reserved"
+        elif "Gelöscht •" in title_text:
+            status = "deleted"
+        title_classes = await title_element.get_attribute("class")
+        if title_classes and "is-sold" in title_classes:
+            status = "sold"
+    if await page.query_selector(".badge-sold"):
+        status = "sold"
 
-        price_element = await lib.get_element_content(page, "#viewad-price")
-        price = lib.parse_price(price_element)
-        description = await lib.get_element_content(page, "#viewad-description-text")
-        if description:
-            description = re.sub(r"[ \t]+", " ", description).strip()
-            description = re.sub(r"\n+", "\n", description)
+    price = lib.parse_price(await lib.get_element_content(page, "#viewad-price"))
+    description = await lib.get_element_content(page, "#viewad-description-text")
+    if description:
+        description = re.sub(r"[ \t]+", " ", description).strip()
+        description = re.sub(r"\n+", "\n", description)
 
-        images = await lib.get_image_sources(page, ".galleryimage-element img")
-        seller_details = await lib.get_seller_details(page)
-        details = (
-            await lib.get_details(page)
-            if await page.query_selector("#viewad-details")
-            else {}
+    images = await lib.get_image_sources(page, ".galleryimage-element img")
+    seller_details = await lib.get_seller_details(page)
+    details = (
+        await lib.get_details(page)
+        if await page.query_selector("#viewad-details")
+        else {}
+    )
+    features = (
+        await lib.get_features(page)
+        if await page.query_selector("#viewad-configuration")
+        else {}
+    )
+    shipping_text = await lib.get_element_content(
+        page, ".boxedarticle--details--shipping"
+    )
+    shipping = None
+    if shipping_text:
+        if "Nur Abholung" in shipping_text:
+            shipping = "pickup"
+        elif "Versand" in shipping_text:
+            shipping = "shipping"
+
+    return {
+        "id": ad_id,
+        "scraped_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "url_requested": url,
+        "url_redirected": final_url,
+        "categories": categories,
+        "title": title.split(" • ")[-1].strip() if " • " in title else title.strip(),
+        "status": status,
+        "price": price,
+        "delivery": shipping,
+        "location": await lib.get_location(page),
+        "media": {
+            "images": {"count": len(images), "urls": images},
+            "videos": {"count": 0, "urls": []},
+            "audios": {"count": 0, "urls": []},
+        },
+        "details": details,
+        "features": features,
+        "description": description,
+        "seller": seller_details,
+        "extra_info": await lib.get_extra_info(page),
+    }
+
+
+async def get_inserate_details(
+    url: str,
+    page_factory,
+    outbound_controller: OutboundController,
+    *,
+    is_retry: bool = False,
+):
+    try:
+        page, _ = await outbound_controller.navigate_with_page(
+            page_factory,
+            url,
+            is_retry=is_retry,
+            timeout_ms=120_000,
         )
-        features = (
-            await lib.get_features(page)
-            if await page.query_selector("#viewad-configuration")
-            else {}
-        )
-
-        shipping_text = await lib.get_element_content(
-            page, ".boxedarticle--details--shipping"
-        )
-        shipping = None
-        if shipping_text:
-            if "Nur Abholung" in shipping_text:
-                shipping = "pickup"
-            elif "Versand" in shipping_text:
-                shipping = "shipping"
-
-        location = await lib.get_location(page)
-        extra_info = await lib.get_extra_info(page)
-
-        return {
-            "id": ad_id,
-            "scraped_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "url_requested": url,
-            "url_redirected": final_url,
-            "categories": categories,
-            "title": title.split(" • ")[-1].strip()
-            if " • " in title
-            else title.strip(),
-            "status": status,
-            "price": price,
-            "delivery": shipping,
-            "location": location,
-            "media": {
-                "images": {"count": len(images), "urls": images},
-                "videos": {"count": 0, "urls": []},
-                "audios": {"count": 0, "urls": []},
-            },
-            "details": details,
-            "features": features,
-            "description": description,
-            "seller": seller_details,
-            "extra_info": extra_info,
-        }
+        return await _extract_inserat_details_from_page(url, page)
+    except OutboundControlError:
+        raise
     except Exception as e:
         print(f"[ERROR] {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def execute_detail_page(
+    browser_manager: OptimizedPlaywrightManager,
+    outbound_controller: OutboundController,
+    *,
+    listing_id: str,
+    is_retry: bool = False,
+    page_setup_timeout_seconds: float = 30.0,
+    extraction_timeout_seconds: float = 30.0,
+    cleanup_timeout_seconds: float = 30.0,
+) -> DetailPageExecution:
+    """Execute exactly one persisted detail work item under one outbound lease."""
+
+    listing_id = normalize_listing_id(listing_id)
+    for name, value in (
+        ("page_setup_timeout_seconds", page_setup_timeout_seconds),
+        ("extraction_timeout_seconds", extraction_timeout_seconds),
+        ("cleanup_timeout_seconds", cleanup_timeout_seconds),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or value <= 0
+        ):
+            raise ValueError(f"{name} must be a positive number")
+
+    url = f"https://www.kleinanzeigen.de/s-anzeige/{listing_id}"
+    context = None
+    page = None
+
+    async def create_page():
+        nonlocal context, page
+        async with asyncio.timeout(page_setup_timeout_seconds):
+            context = await browser_manager.get_context()
+            page = await context.new_page()
+            await install_safe_page_routing(page)
+        return page
+
+    async def extract(navigated_page, response) -> DetailPageExecution:
+        async with asyncio.timeout(extraction_timeout_seconds):
+            if getattr(response, "status", None) == 404:
+                return DetailPageExecution(
+                    status="not_found",
+                    data=_deleted_response(url, navigated_page.url),
+                )
+            status = getattr(response, "status", None)
+            if isinstance(status, int) and status >= 500:
+                raise RuntimeError("detail page returned a transient server error")
+            details = await _extract_inserat_details_from_page(url, navigated_page)
+            if details.get("not_found"):
+                return DetailPageExecution(status="not_found", data=details)
+            extracted_id = details.get("id")
+            if not extracted_id or str(extracted_id).startswith("[ERROR]"):
+                raise DetailExtractionError(
+                    "detail page did not expose a reliable listing ID"
+                )
+            return DetailPageExecution(status="complete", data=details)
+
+    async def cleanup(_navigated_page) -> None:
+        await close_page_and_release_context(
+            page,
+            context,
+            browser_manager,
+            timeout_seconds=cleanup_timeout_seconds,
+        )
+
+    return await outbound_controller.run_navigation(
+        create_page,
+        url,
+        extract,
+        cleanup=cleanup,
+        is_retry=is_retry,
+        wait_until="domcontentloaded",
+        wait_for_circuit=False,
+    )
+
+
 async def get_inserate_details_optimized(
     browser_manager: OptimizedPlaywrightManager,
+    outbound_controller: OutboundController,
     listing_id: str,
-    retry_count: int = 2,
+    retry_count: int | None = None,
     request_id: str = None,
     progress: str = None,
 ) -> dict:
@@ -180,12 +279,19 @@ async def get_inserate_details_optimized(
     Args:
         browser_manager: OptimizedPlaywrightManager instance
         listing_id: The listing ID to fetch details for
-        retry_count: Maximum number of retries (default: 2)
+        retry_count: Optional caller cap; the shared controller budget is authoritative
 
     Returns:
         Dictionary containing listing details, performance metrics, and warnings
     """
     from utils.performance import PerformanceTracker
+
+    # This scraper is called by multiple routers. Keep the security boundary at
+    # the shared sink as well as at the public request models.
+    listing_id = normalize_listing_id(listing_id)
+    log_listing_id = sanitize_log_value(listing_id, max_length=42)
+    log_request_id = sanitize_log_value(request_id, max_length=64) if request_id else ""
+    log_progress = sanitize_log_value(progress, max_length=16) if progress else ""
 
     # Initialize error handling and performance tracking
     logger = ErrorLogger("inserat_scraper")
@@ -194,28 +300,45 @@ async def get_inserate_details_optimized(
     tracker.start_request()
 
     url = f"https://www.kleinanzeigen.de/s-anzeige/{listing_id}"
-    _rid = f" {request_id}" if request_id else ""
-    _pos = f" {progress}" if progress else ""
-    logger.logger.info(f"[DETAIL{_rid}{_pos}] Fetching ad {listing_id}: {url}")
+    _rid = f" {log_request_id}" if log_request_id else ""
+    _pos = f" {log_progress}" if log_progress else ""
+    logger.logger.info(
+        "[DETAIL%s%s] Fetching ad %s: %s",
+        _rid,
+        _pos,
+        log_listing_id,
+        url,
+    )
+    effective_retry_count = outbound_controller.bounded_retry_count(retry_count)
 
     with error_handling_context(
         operation="fetch_listing_details", listing_id=listing_id, url=url, logger=logger
     ) as error_ctx:
         last_structured_error = None
 
-        for attempt in range(retry_count + 1):  # +1 for initial attempt
+        for attempt in range(effective_retry_count + 1):
             start_time = time.time()
 
             try:
                 # Use semaphore-controlled execution
                 async def fetch_operation():
-                    context = await browser_manager.get_context()
+                    context = None
                     page = None
                     try:
-                        page = await context.new_page()
+
+                        async def create_page():
+                            nonlocal context, page
+                            context = await browser_manager.get_context()
+                            page = await context.new_page()
+                            return page
 
                         # Get listing details using existing function
-                        details = await get_inserate_details(url, page)
+                        details = await get_inserate_details(
+                            url,
+                            create_page,
+                            outbound_controller,
+                            is_retry=attempt > 0,
+                        )
 
                         # Ad is gone (redirect or expired page detected)
                         if details.get("not_found"):
@@ -224,10 +347,10 @@ async def get_inserate_details_optimized(
                         # Validate the extracted details
                         if not details or not details.get("id"):
                             warning_manager.add_warning(
-                                f"Incomplete data extracted for listing {listing_id}",
+                                f"Incomplete data extracted for listing {log_listing_id}",
                                 ErrorSeverity.MEDIUM,
                                 error_ctx.context,
-                                affected_items=[listing_id],
+                                affected_items=[log_listing_id],
                                 impact_description="Some listing information may be missing",
                             )
 
@@ -235,24 +358,26 @@ async def get_inserate_details_optimized(
                         status = details.get("status", "unknown")
                         if status in ["sold", "deleted"]:
                             warning_manager.add_warning(
-                                f"Listing {listing_id} has status: {status}",
+                                f"Listing {log_listing_id} has status: {status}",
                                 ErrorSeverity.LOW,
                                 error_ctx.context,
-                                affected_items=[listing_id],
+                                affected_items=[log_listing_id],
                                 impact_description=f"Listing is no longer available ({status})",
                             )
 
                         return details
 
                     finally:
-                        if page:
-                            await page.close()
-                        await browser_manager.release_context(context)
+                        await close_page_and_release_context(
+                            page,
+                            context,
+                            browser_manager,
+                            suppress_errors=sys.exception() is not None,
+                        )
 
-                # Execute with concurrency control
-                details = await browser_manager.execute_with_semaphore(
-                    fetch_operation()
-                )
+                # The process-global outbound controller is the first admission
+                # boundary; browser contexts are allocated only after admission.
+                details = await fetch_operation()
 
                 # Ad was not found (redirect or expired page): return not-found response immediately
                 if details.get("not_found"):
@@ -300,7 +425,7 @@ async def get_inserate_details_optimized(
                 # Log successful operation
                 if attempt > 0:
                     logger.log_operation_summary(
-                        operation=f"fetch_details_{listing_id}",
+                        operation=f"fetch_details_{log_listing_id}",
                         total_items=1,
                         successful_items=1,
                         warnings=warning_manager.get_warnings(),
@@ -326,6 +451,13 @@ async def get_inserate_details_optimized(
 
                 return response
 
+            except OutboundNavigationTimeout:
+                if attempt < effective_retry_count:
+                    await outbound_controller.wait_before_retry(attempt)
+                    continue
+                raise
+            except OutboundControlError:
+                raise
             except Exception as e:
                 # Classify and handle the error
                 error_ctx.context.retry_attempt = attempt
@@ -333,22 +465,19 @@ async def get_inserate_details_optimized(
                 last_structured_error = structured_error
 
                 # Check if we should retry based on error classification
-                if attempt < retry_count and structured_error.should_retry(retry_count):
+                if attempt < effective_retry_count and structured_error.should_retry(
+                    effective_retry_count
+                ):
                     # Add warning about retry attempt
                     warning_manager.add_warning(
-                        f"Retrying listing {listing_id} after {structured_error.category.value} error (attempt {attempt + 1}/{retry_count + 1})",
+                        f"Retrying listing {log_listing_id} after {structured_error.category.value} error (attempt {attempt + 1}/{effective_retry_count + 1})",
                         ErrorSeverity.MEDIUM,
                         error_ctx.context,
-                        affected_items=[listing_id],
+                        affected_items=[log_listing_id],
                         impact_description=f"Temporary delay before retry due to {structured_error.category.value} error",
                     )
 
-                    # Exponential backoff with jitter
-                    import asyncio
-                    import random
-
-                    wait_time = (2**attempt) + random.uniform(0, 1)
-                    await asyncio.sleep(wait_time)
+                    await outbound_controller.wait_before_retry(attempt)
                     continue
 
                 # All retries exhausted or non-recoverable error
@@ -384,7 +513,7 @@ async def get_inserate_details_optimized(
 
                     # Log failed operation
                     logger.log_operation_summary(
-                        operation=f"fetch_details_{listing_id}",
+                        operation=f"fetch_details_{log_listing_id}",
                         total_items=1,
                         successful_items=0,
                         warnings=warning_manager.get_warnings(),

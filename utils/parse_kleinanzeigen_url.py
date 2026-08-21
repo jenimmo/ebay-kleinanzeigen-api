@@ -6,6 +6,21 @@ import re
 from urllib.parse import urlparse, parse_qs, unquote
 
 
+class InvalidUrlFilterError(ValueError):
+    """Raised when a recognized URL filter has an invalid numeric value."""
+
+
+def _parse_non_negative_int(value: str, field: str, *, minimum: int = 0) -> int:
+    """Parse a decimal URL filter without accepting signs or partial values."""
+    if not value.isascii() or not value.isdecimal():
+        raise InvalidUrlFilterError(f"Invalid numeric value for {field}")
+
+    parsed = int(value)
+    if parsed < minimum:
+        raise InvalidUrlFilterError(f"Invalid numeric value for {field}")
+    return parsed
+
+
 def parse_kleinanzeigen_url(url: str) -> dict:
     """Parse a Kleinanzeigen URL and extract all known parameters."""
     parsed = urlparse(url)
@@ -20,7 +35,7 @@ def parse_kleinanzeigen_url(url: str) -> dict:
     if "locationStr" in qs:
         result["location"] = qs["locationStr"][0]
     if "radius" in qs:
-        result["radius"] = int(qs["radius"][0])
+        result["radius"] = _parse_non_negative_int(qs["radius"][0], "radius")
 
     # ── Path segments ─────────────────────────────────────────────────────
     segments = path.split("/")
@@ -29,11 +44,15 @@ def parse_kleinanzeigen_url(url: str) -> dict:
     for i, seg in enumerate(segments):
         # Page — seite:2
         if seg.startswith("seite:"):
-            result["page"] = int(seg.split(":")[1])
+            result["page"] = _parse_non_negative_int(
+                seg.removeprefix("seite:"), "page", minimum=1
+            )
 
         # Page (generic search) — s-seite:2
-        elif re.match(r"^s-seite:\d+$", seg):
-            result["page"] = int(seg.split(":")[1])
+        elif seg.startswith("s-seite:"):
+            result["page"] = _parse_non_negative_int(
+                seg.removeprefix("s-seite:"), "page", minimum=1
+            )
 
         # Category slug — s-wohnwagen-mobile
         elif seg.startswith("s-") and "category_slug" not in result:
@@ -42,11 +61,12 @@ def parse_kleinanzeigen_url(url: str) -> dict:
         # Price range — preis:1000:15000
         elif seg.startswith("preis:"):
             parts = seg.split(":")
-            if len(parts) >= 3:
-                if parts[1]:
-                    result["min_price"] = int(parts[1])
-                if parts[2]:
-                    result["max_price"] = int(parts[2])
+            if len(parts) != 3:
+                raise InvalidUrlFilterError("Invalid price range")
+            if parts[1]:
+                result["min_price"] = _parse_non_negative_int(parts[1], "min_price")
+            if parts[2]:
+                result["max_price"] = _parse_non_negative_int(parts[2], "max_price")
 
         # Filter segment — c220+... or k0c220+...
         elif re.match(r"^k?\d*c\d+", seg):
@@ -67,7 +87,9 @@ def parse_kleinanzeigen_url(url: str) -> dict:
         for attr in fs.split("+"):
             # Category ID — c220
             if re.match(r"^c\d+$", attr):
-                result["category_id"] = int(attr[1:])
+                result["category_id"] = _parse_non_negative_int(
+                    attr[1:], "category_id", minimum=1
+                )
                 continue
 
             if ":" not in attr:
@@ -75,13 +97,39 @@ def parse_kleinanzeigen_url(url: str) -> dict:
 
             key, value = attr.split(":", 1)
 
-            # Year — *.ez_i:2008,  (trailing comma = open-ended)
+            # Year — closed range (2008,2024), open range (2008,),
+            # upper-bounded range (,2024), or the historic single-value form.
             if key.endswith(".ez_i"):
-                year_str = value.rstrip(",")
-                if year_str:
-                    result["year_from"] = int(year_str)
-                if value.endswith(","):
-                    result["year_to"] = None
+                if value.count(",") > 1:
+                    raise InvalidUrlFilterError("Invalid year range")
+
+                if "," in value:
+                    year_from, year_to = value.split(",", 1)
+                    if not year_from and not year_to:
+                        raise InvalidUrlFilterError("Invalid year range")
+                    if year_from:
+                        result["year_from"] = _parse_non_negative_int(
+                            year_from, "year_from", minimum=1
+                        )
+                    if year_to:
+                        result["year_to"] = _parse_non_negative_int(
+                            year_to, "year_to", minimum=1
+                        )
+                    else:
+                        result["year_to"] = None
+                elif value:
+                    result["year_from"] = _parse_non_negative_int(
+                        value, "year_from", minimum=1
+                    )
+                else:
+                    raise InvalidUrlFilterError("Invalid year range")
+
+                if (
+                    result.get("year_from") is not None
+                    and result.get("year_to") is not None
+                    and result["year_from"] > result["year_to"]
+                ):
+                    raise InvalidUrlFilterError("Invalid year range")
 
             # Article type — *.art_s:wohnwagen
             elif key.endswith(".art_s"):

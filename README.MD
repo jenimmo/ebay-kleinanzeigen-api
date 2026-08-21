@@ -60,13 +60,10 @@ uvicorn main:app --reload
 
 The API will be available at `http://localhost:8000`
 
-#### Non-headless mode (visible browser)
+#### Browser mode
 
-Set the `HEADLESS` environment variable to `false` to watch the browser while scraping — useful during development:
-
-```sh
-HEADLESS=false uvicorn main:app --reload
-```
+The current browser manager always launches Chromium in headless mode. A
+`HEADLESS` environment switch is not implemented.
 
 ### Installation using UV
 
@@ -86,12 +83,6 @@ uv sync
 uv run uvicorn main:app --reload
 ```
 
-#### Non-headless mode with UV
-
-```sh
-HEADLESS=false uv run uvicorn main:app --reload
-```
-
 ### Installation using Docker
 
 1. Build the Docker image
@@ -103,18 +94,208 @@ docker build -t ebay-kleinanzeigen-api .
 2. Run the Docker container
 
 ```sh
-docker run -p 8000:8000 ebay-kleinanzeigen-api
+docker run -p 8000:8000 -v kleinanzeigen-jobs:/app/data ebay-kleinanzeigen-api
 ```
 
 The API will be available at `http://localhost:8000`
 
+### Outbound control and production limits
+
+API calls now create durable SQLite jobs instead of keeping a request open while
+browser work waits. A fixed worker pool schedules one navigation per job and
+round, so several agents can submit work concurrently without one large job
+monopolizing the outbound connection. Accepted jobs have no queue-age or total
+runtime timeout and survive client disconnects and API restarts.
+
+Every search page, detail page, retry, legacy adapter, and half-open probe still
+passes through one process-wide outbound controller. Its concurrency permit is
+held from page allocation through `page.goto()`, extraction, and cleanup. The
+SQLite queue therefore stores waiting work without creating one coroutine per
+listing, while the controller remains the only production code allowed to call
+`page.goto()`.
+
+The following environment variables are read and validated during application
+startup. Invalid or out-of-range values abort startup with a clear error instead
+of silently weakening the limits:
+
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| `KLEINANZEIGEN_OUTBOUND_MAX_CONCURRENCY` | `1` | Maximum full page lifecycles active at once. |
+| `KLEINANZEIGEN_OUTBOUND_MIN_INTERVAL_SECONDS` | `3.0` | Minimum interval between navigation starts. |
+| `KLEINANZEIGEN_OUTBOUND_JITTER_SECONDS` | `1.0` | Maximum additive start jitter. |
+| `KLEINANZEIGEN_OUTBOUND_QUEUE_CAPACITY` | `20` | Compatibility limit for direct legacy controller callers; durable jobs do not use this queue. |
+| `KLEINANZEIGEN_OUTBOUND_QUEUE_TIMEOUT_SECONDS` | `30` | Compatibility timeout for direct legacy controller callers; durable jobs have no queue timeout. |
+| `KLEINANZEIGEN_OUTBOUND_NAVIGATION_TIMEOUT_SECONDS` | `60` | Maximum duration of one navigation attempt. |
+| `KLEINANZEIGEN_OUTBOUND_RETRY_BUDGET` | `1` | One shared transient retry budget for every navigation, including durable search/detail jobs and legacy helpers. |
+| `KLEINANZEIGEN_OUTBOUND_COOLDOWN_SECONDS` | `120` | Base cooldown after a block signal. |
+| `KLEINANZEIGEN_OUTBOUND_MAX_COOLDOWN_SECONDS` | `3600` | Maximum local exponential cooldown; a longer valid `Retry-After` remains authoritative up to 24 hours. |
+
+Durable job settings:
+
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| `KLEINANZEIGEN_JOB_DATABASE_PATH` | `data/kleinanzeigen_jobs.sqlite3` | SQLite database and adjacent exclusive process lock. The Docker image overrides this with `/app/data/kleinanzeigen_jobs.sqlite3`. |
+| `KLEINANZEIGEN_JOB_WORKER_COUNT` | `1` | Fixed number of scheduler workers. |
+| `KLEINANZEIGEN_JOB_LEASE_SECONDS` | `180` | Recoverable work-item lease. |
+| `KLEINANZEIGEN_JOB_HEARTBEAT_SECONDS` | `30` | Lease heartbeat interval. |
+| `KLEINANZEIGEN_JOB_RETRY_BUDGET` | `1` | Deprecated compatibility alias. If present, it must equal `KLEINANZEIGEN_OUTBOUND_RETRY_BUDGET`; the outbound value is authoritative. |
+| `KLEINANZEIGEN_JOB_POLL_INTERVAL_SECONDS` | `0.25` | Idle scheduler polling ceiling. |
+| `KLEINANZEIGEN_JOB_MIN_DISPATCH_INTERVAL_SECONDS` | `3.0` | Persistent scheduler start floor. |
+| `KLEINANZEIGEN_JOB_DISPATCH_JITTER_SECONDS` | `1.0` | Maximum additive scheduler jitter. |
+| `KLEINANZEIGEN_JOB_COOLDOWN_INITIAL_SECONDS` | `120` | Fallback cooldown when no controller signal is available. |
+| `KLEINANZEIGEN_JOB_COOLDOWN_MAX_SECONDS` | `3600` | Maximum fallback exponential cooldown. |
+| `KLEINANZEIGEN_JOB_PAGE_SETUP_TIMEOUT_SECONDS` | `30` | Context/page setup deadline per attempt. |
+| `KLEINANZEIGEN_JOB_EXTRACTION_TIMEOUT_SECONDS` | `30` | DOM extraction deadline per attempt. |
+| `KLEINANZEIGEN_JOB_CLEANUP_TIMEOUT_SECONDS` | `30` | Cleanup deadline per attempt. |
+| `KLEINANZEIGEN_JOB_RETENTION_DAYS` | `7` | Retention for completed or cancelled jobs. |
+| `KLEINANZEIGEN_JOB_MIN_FREE_DISK_BYTES` | `536870912` | Free-space reserve required before accepting a new job; `512MiB` syntax is also accepted. |
+
+These conservative defaults protect the service from accidental concurrency
+spikes. They are **not** a guaranteed "safe" or permitted request rate, and
+technical throttling is neither authorization nor approval by Kleinanzeigen.
+Operators remain responsible for the applicable terms, permissions, and legal
+requirements.
+
+Job submission normally returns `202 Accepted`, including while work is backed
+up or the upstream circuit is cooling down. A submission returns `503` only
+before acceptance when the job manager or SQLite storage is unavailable, or
+when the configured disk reserve is not available. Already accepted work is not
+discarded. A client or proxy
+disconnect does not cancel a job; only `DELETE /jobs/{job_id}` does.
+
+The controller evaluates the response returned by Playwright navigation and
+detects HTTP `403`, HTTP `429`, `Retry-After`, and known captcha, challenge, or
+block-page signals. Such a response is never interpreted as a successful empty
+search. It persistently pauses all jobs without consuming their transient retry
+budget. Before the stored deadline there are no further navigation starts;
+afterwards exactly one half-open probe is allowed. Repeated blocks extend the
+cooldown exponentially. Captchas and access restrictions are never bypassed.
+
+`GET /outbound-status` returns a non-sensitive, process-local snapshot of the
+configured limits, active controller work, durable job counts, oldest queue age,
+circuit state, cooldown, and aggregate counters. It does not expose URLs,
+queries, headers, cookies, or response bodies.
+
+The controller is global **within one API process only**. An exclusive lock
+prevents two local processes from operating the same job database, but separate
+containers can still multiply the effective rate. Run exactly one Uvicorn worker
+and one container, and mount `/app/data` when using Docker:
+
+```sh
+docker run -p 8000:8000 -v kleinanzeigen-jobs:/app/data ebay-kleinanzeigen-api
+```
+
+All agents, including a future MCP server, must call this shared API process and
+must not start their own browser manager. Horizontal scaling requires a later
+Redis-backed distributed queue, rate limiter, and circuit state.
+
 ### API Endpoints
+
+#### Canonical durable job workflow
+
+Create a search from structured filters. Search jobs automatically traverse all
+required result pages up to 200 unique listings and persist every extracted
+search-card field from those pages:
+
+```sh
+curl -i -X POST http://localhost:8000/jobs/search \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: agent-a-fahrrad-2026-08-21' \
+  -d '{"query":"Fahrrad","location":"Berlin","radius":5}'
+```
+
+Alternatively, submit a complete validated Kleinanzeigen search URL:
+
+```json
+{"url":"https://www.kleinanzeigen.de/s-fahrraeder/berlin/c217l3331"}
+```
+
+Both forms return `202` with `job_id`, `status_url`, and `results_url`. The
+optional idempotency key returns the existing job when key and payload match;
+reusing it with another payload returns `409`.
+
+Use the status and result endpoints without causing additional browser access:
+
+```http
+GET /jobs/{job_id}
+GET /jobs/{job_id}/results?limit=100&cursor=...
+```
+
+Status values are `queued`, `running`, `waiting_cooldown`,
+`awaiting_continuation`, `needs_attention`, `completed`, and `cancelled`.
+Results use a stable opaque cursor backed by SQLite.
+
+Search cursors page through immutable result order. Detail results are a
+monotonic change feed while work is running: the same `listing_id` can appear
+again after changing from `pending` to a final state, and clients should keep
+the newest item per ID. After the detail job reaches a terminal state, a fresh
+request without a cursor returns exactly one current row per requested ID.
+
+If Kleinanzeigen reports more than 200 results, the first 200 unique results are
+released and the job enters `awaiting_continuation`. Each explicit call releases
+and schedules at most the next 200. Read `continuation.token` from the current
+job status and submit it unchanged:
+
+```http
+POST /jobs/{job_id}/continue
+Content-Type: application/json
+
+{"continuation_token":"<token-from-job-status>"}
+```
+
+The token authorizes exactly one tranche. Retrying the same token after a lost
+or cancelled HTTP acknowledgement is idempotent and cannot release another
+200 results. A later tranche requires the new token returned by status or the
+previous continuation acknowledgement. Durable action receipts make even older
+valid tokens replay their original acknowledgement without changing work;
+unknown or mismatched revisions return `409`.
+
+Any unavoidable overflow already present on a boundary page remains
+stored but invisible until this confirmation. Search results are deduplicated by
+canonical `adid`; organic, Top, and Pro cards are included.
+
+Opening listing pages is always a second explicit job. It can freeze the
+currently released results of a search or accept an explicit ID list:
+
+```sh
+curl -X POST http://localhost:8000/jobs/details \
+  -H 'Content-Type: application/json' \
+  -d '{"source_search_job_id":"<search-job-uuid>"}'
+```
+
+```json
+{"listing_ids":["3490152593-217-3401","3461111871"]}
+```
+
+Every requested ID remains visible as `pending`, `complete`, `not_found`,
+`needs_attention`, or `cancelled`; failures are not silently removed.
+Persistent technical failures pause the job. Read `resume.token` from current
+job status and retry exactly that attention cycle explicitly:
+
+```http
+POST /jobs/{job_id}/resume
+Content-Type: application/json
+
+{"resume_token":"<token-from-job-status>"}
+```
+
+Resume tokens also have durable replay receipts, so an old retry can never
+authorize work from a newer failure cycle. `DELETE /jobs/{job_id}` is the only
+request that cancels accepted work; cancellation drains already running browser
+work even if the requesting client disconnects after the database commit.
+
+The older scraping endpoints below are compatibility adapters. `/inserate`,
+`/inserate-by-url`, `/inserat/{id}`, and `/inserate/batch` now return `202` job
+records rather than synchronous scrape results. `/inserate-detailed` returns
+`410 Gone`; use a search job followed by a detail job.
 
 #### 1. Fetch Listings (Standard)
 
 **Endpoint:** `GET /inserate`
 
-**Description:** Retrieves a list of listings based on search criteria.
+**Deprecated:** Creates a durable search job. `page_count` is accepted only for
+legacy compatibility; the job discovers pages itself and applies the 200-result
+continuation boundary.
 
 ##### Query Parameters
 
@@ -123,7 +304,9 @@ The API will be available at `http://localhost:8000`
 - **`radius`** *(integer, optional)*: The search radius in kilometers from the specified location (e.g., `5` for a 5 km radius).
 - **`min_price`** *(integer, optional)*: The minimum price in Euros for the listings (e.g., `200` for at least 200 Euros).
 - **`max_price`** *(integer, optional)*: The maximum price in Euros for the listings (e.g., `500` for at most 500 Euros).
-- **`page_count`** *(integer, optional)*: The number of pages to search or return (e.g., `5` for the first 5 pages, default is 1, max: 20 pages).
+- **`page_count`** *(integer, deprecated)*: Accepted for compatibility but
+  ignored. The durable job discovers pages itself and releases results in
+  200-item steps.
 - **`min_publish_date`** *(datetime, optional)*: Stop fetching once a page contains listings published before this datetime. Listings older than the threshold are removed from the final results. Format: `YYYY-MM-DDTHH:MM:SS` (e.g., `2026-05-03T08:00:00`). Useful for intraday runs that should only collect new listings.
 
 ##### Example Requests
@@ -141,7 +324,8 @@ curl "http://localhost:8000/inserate?query=fahrrad&page_count=10&min_publish_dat
 
 **Endpoint:** `GET /inserat/{id}`
 
-**Description:** Retrieves detailed information about a specific listing.
+**Deprecated:** Creates a one-ID detail job and returns `202`. Use
+`POST /jobs/details` for new integrations.
 
 ##### Path Parameters
 
@@ -156,19 +340,29 @@ curl "http://localhost:8000/inserate?query=fahrrad&page_count=10&min_publish_dat
   ```
   /s-anzeige/{slug}/{adid}-{category_id}-{location_id}
   ```
-  The suffix `-{category_id}-{location_id}` is used by Kleinanzeigen for server-side routing (CDN/load balancer can route directly without a database lookup). Using the full segment avoids a potential server-side redirect — Kleinanzeigen may or may not redirect depending on the listing.
+  The suffix `-{category_id}-{location_id}` is used by Kleinanzeigen for routing.
+  The full segment is the most precise identifier exposed by search results;
+  Kleinanzeigen may still redirect to a canonical URL containing the title slug.
+
+##### Query Parameters
+
+- **`batch_id`** *(string, deprecated)*: Accepted and validated for legacy
+  compatibility, but ignored by the durable job adapter.
 
 ##### curl Examples
 
-**With full URL segment (recommended, ~4s):**
+**With full URL segment (recommended):**
 ```sh
 curl -s http://localhost:8000/inserat/3399373623-220-16792 | python -m json.tool
 ```
 
-**With plain adid only (also works, redirect may or may not occur):**
+**With plain adid only (also works):**
 ```sh
 curl -s http://localhost:8000/inserat/3399373623 | python -m json.tool
 ```
+
+Both calls now return the `202` job-submission shape documented above. Retrieve
+the eventual detail data through the returned `results_url`.
 
 **Tip:** When iterating over search results, use the `url` field directly — extract the last path segment to get the full id:
 ```sh
@@ -177,7 +371,7 @@ echo "https://www.kleinanzeigen.de/s-anzeige/fendt-bianco/3399373623-220-16792" 
 # → 3399373623-220-16792
 ```
 
-##### Example Response
+##### Historical synchronous response (no longer returned by this endpoint)
 
 ```json
 {
@@ -200,11 +394,17 @@ echo "https://www.kleinanzeigen.de/s-anzeige/fendt-bianco/3399373623-220-16792" 
       "zip": "88299",
       "city": "Leutkirch im Allgäu"
     },
-    "views": "142",
     "description": "Verkaufe unseren gepflegten Fendt Bianco...",
-    "images": [
-      "https://img.kleinanzeigen.de/api/v1/prod-ads/images/..."
-    ],
+    "media": {
+      "images": {
+        "count": 1,
+        "urls": [
+          "https://img.kleinanzeigen.de/api/v1/prod-ads/images/..."
+        ]
+      },
+      "videos": {"count": 0, "urls": []},
+      "audios": {"count": 0, "urls": []}
+    },
     "details": {
       "Baujahr": "2015",
       "Zustand": "Gebraucht"
@@ -214,7 +414,10 @@ echo "https://www.kleinanzeigen.de/s-anzeige/fendt-bianco/3399373623-220-16792" 
       "name": "Max Mustermann",
       "type": "private"
     },
-    "extra_info": {}
+    "extra_info": {
+      "created_at": "4. Mai 2026",
+      "views": "142"
+    }
   },
   "performance_metrics": {
     "success_rate": 100,
@@ -223,42 +426,35 @@ echo "https://www.kleinanzeigen.de/s-anzeige/fendt-bianco/3399373623-220-16792" 
 }
 ```
 
-**Response fields:**
+**Fields in a completed detail-job result:**
 
 - **`data.id`** — Kleinanzeigen listing ID (numeric string).
 - **`data.url_requested`** — The URL sent to Kleinanzeigen. When called with a plain adid, this is the short form without slug.
-- **`data.url_redirected`** — The final URL after any server-side redirect. When called with a plain adid, this contains the full canonical URL including slug and routing suffix `{adid}-{category_id}-{location_id}`. Identical to `url_requested` when the full segment was passed.
+- **`data.url_redirected`** — The final URL after redirects. It may contain the
+  canonical slug and routing suffix even when the submitted ID already used the
+  full segment.
 - **`data.status`** — Listing status: `active`, `sold`, `reserved`, or `deleted`.
 - **`data.price.negotiable`** — `true` if the price is marked as negotiable (VB).
 - **`data.delivery`** — `pickup`, `shipping`, or `null`.
+- **`data.media.images`** — Image count and all extracted image URLs.
 - **`data.details`** — Key/value pairs of listing attributes (e.g. Baujahr, Zustand).
 - **`data.features`** — Additional configuration options if present.
+- **`data.extra_info.views`** — View count if Kleinanzeigen exposes it.
 
 #### 3. Fetch Listings with Details (Combined)
 
 **Endpoint:** `GET /inserate-detailed`
 
-**Description:** Retrieves listings and their detailed information in a single request.
-
-##### Query Parameters
-
-Same as `/inserate` endpoint, plus:
-
-- **`max_concurrent_details`** *(integer, optional)*: Maximum concurrent detail fetches (default: 5, max: 10).
-
-##### Example Request
-
-```http
-GET /inserate-detailed?query=laptop&page_count=2&max_concurrent_details=5
-```
+**Removed:** Returns `410 Gone`. Create a search job first and then explicitly
+create a detail job from its `job_id`. This prevents an apparently harmless
+search request from opening hundreds of listing pages.
 
 #### 4. Scrape by URL
 
 **Endpoint:** `POST /inserate-by-url`
 
-**Description:** Scrape listings using a full Kleinanzeigen search URL. All filters already encoded in the URL (category, brand, year, fuel type, transmission, car type, etc.) are preserved as-is. Page numbers are injected automatically for multi-page fetching. Use this when `/inserate` does not yet support a filter you need.
-
-Pages are fetched **sequentially** to avoid IP-level rate limiting by Kleinanzeigen.
+**Deprecated:** Creates a durable search job from a full Kleinanzeigen URL and
+returns `202`. Prefer `POST /jobs/search` with the same `url` field.
 
 ##### Request Body
 
@@ -269,13 +465,19 @@ Pages are fetched **sequentially** to avoid IP-level rate limiting by Kleinanzei
 }
 ```
 
-- **`url`** *(string, required)*: Any Kleinanzeigen search or category URL.
-- **`max_pages`** *(integer, optional)*: Number of pages to fetch (default: 1). Each page returns up to 25 listings.
+- **`url`** *(string, required)*: HTTPS search or category URL on
+  `kleinanzeigen.de` or `www.kleinanzeigen.de` (maximum 4096 UTF-8 bytes).
+- **`max_pages`** *(integer, deprecated)*: Accepted but ignored. The durable job
+  discovers pages and pauses after every 200 released unique results.
 - **`min_publish_date`** *(datetime, optional)*: Stop fetching once a page contains listings published before this datetime. Listings older than the threshold are removed from the final results. Format: `YYYY-MM-DDTHH:MM:SS`. Supports intraday precision — e.g. `"2026-05-04T08:00:00"` keeps only listings from that morning onward.
 
-##### curl Examples
+For SSRF protection, redirects must stay on a canonical Kleinanzeigen host,
+subresources are restricted to the `kleinanzeigen.de` DNS namespace, and
+WebSocket connections are disabled for scraper pages.
 
-**Single page — VW with Klima (25 results):**
+##### Legacy submission examples (`max_pages` is ignored)
+
+**Legacy payload with `max_pages: 1`:**
 ```sh
 curl -X POST http://localhost:8000/inserate-by-url \
   -H "Content-Type: application/json" \
@@ -285,7 +487,7 @@ curl -X POST http://localhost:8000/inserate-by-url \
   }'
 ```
 
-**3 pages — VW with Klima (up to 75 results):**
+**Legacy payload with `max_pages: 3`:**
 ```sh
 curl -X POST http://localhost:8000/inserate-by-url \
   -H "Content-Type: application/json" \
@@ -295,7 +497,7 @@ curl -X POST http://localhost:8000/inserate-by-url \
   }'
 ```
 
-**With full filters — VW Kombi/SUV, Automatik, CNG/LPG, ab 2008, 3 pages:**
+**With full filters — VW Kombi/SUV, Automatik, CNG/LPG, ab 2008:**
 ```sh
 curl -X POST http://localhost:8000/inserate-by-url \
   -H "Content-Type: application/json" \
@@ -325,7 +527,8 @@ curl -s -X POST http://localhost:8000/inserate-by-url \
     "min_publish_date": "2026-05-04T08:00:00"
   }' | python -m json.tool
 ```
-Expected: `pages_requested` < 20, all `published_at` values ≥ `"2026-05-04T08:00:00"`.
+Expected: a `202` job record. Poll its status and results; the persisted search
+stops when it reaches the cutoff.
 
 **Verify early-stop: future cutoff → 0 results, only 1 page fetched:**
 ```sh
@@ -337,9 +540,9 @@ curl -s -X POST http://localhost:8000/inserate-by-url \
     "min_publish_date": "2099-01-01T00:00:00"
   }' | python -m json.tool
 ```
-Expected: `"unique_results": 0`, `"pages_requested": 1`.
+Expected: a `202` job record whose result set is empty after completion.
 
-**Verify no false filtering: past cutoff → full 25 results:**
+**Verify no false filtering with a past cutoff:**
 ```sh
 curl -s -X POST http://localhost:8000/inserate-by-url \
   -H "Content-Type: application/json" \
@@ -349,9 +552,9 @@ curl -s -X POST http://localhost:8000/inserate-by-url \
     "min_publish_date": "2000-01-01T00:00:00"
   }' | python -m json.tool
 ```
-Expected: `"unique_results": 25`.
+Expected: a `202` job record; matching results become available asynchronously.
 
-**Verify schema enforcement: plain date string → HTTP 422:**
+**Plain-date compatibility:**
 ```sh
 curl -s -X POST http://localhost:8000/inserate-by-url \
   -H "Content-Type: application/json" \
@@ -361,7 +564,8 @@ curl -s -X POST http://localhost:8000/inserate-by-url \
     "min_publish_date": "2026-05-04"
   }' | python -m json.tool
 ```
-Expected: HTTP 422 — the time component is required.
+Expected: a `202` job record. Pydantic normalizes the plain date to midnight;
+send a full timestamp when intraday precision matters.
 
 **Pretty-print the response with Python:**
 ```sh
@@ -371,7 +575,7 @@ curl -s -X POST http://localhost:8000/inserate-by-url \
   | python -m json.tool
 ```
 
-##### Example Response
+##### Historical synchronous response (no longer returned by this endpoint)
 
 ```json
 {
@@ -404,7 +608,7 @@ curl -s -X POST http://localhost:8000/inserate-by-url \
 }
 ```
 
-**Response fields:**
+**Fields in the historical synchronous response:**
 
 - **`results`**: Array of listing objects. Each listing contains:
   - `adid` — Kleinanzeigen internal listing ID
@@ -422,7 +626,10 @@ curl -s -X POST http://localhost:8000/inserate-by-url \
 
 **Endpoint:** `POST /convert-url`
 
-**Description:** Parses a Kleinanzeigen URL and returns two groups of parameters: `inserate_params` (what the `/inserate` endpoint currently understands) and `unmapped` (filters not yet supported by `/inserate`, such as category, brand, year, or transmission). Useful for inspecting which parts of a URL can be expressed via the structured API.
+**Description:** Parses a Kleinanzeigen URL into legacy `inserate_params` and
+`unmapped` filters. The emitted `page_count` is retained for compatibility but
+is ignored by the durable `/inserate` adapter. New job integrations can submit
+the original validated URL directly to `POST /jobs/search`.
 
 ##### Request Body
 
@@ -481,7 +688,30 @@ curl -X POST http://localhost:8000/convert-url \
 
 #### API Response Format
 
+##### Durable jobs
+
+Submission:
+
+```json
+{
+  "job_id": "0d42f27f-7e2f-44c1-b917-cab38cc5a53d",
+  "type": "search",
+  "state": "queued",
+  "idempotent_replay": false,
+  "status_url": "/jobs/0d42f27f-7e2f-44c1-b917-cab38cc5a53d",
+  "results_url": "/jobs/0d42f27f-7e2f-44c1-b917-cab38cc5a53d/results"
+}
+```
+
+Status includes persistent progress, result counts, continuation information,
+queue age/ETA, cooldown information, and visible errors. Result pages contain
+`items`, `next_cursor`, and `has_more`. Search polling and result pagination
+never contact Kleinanzeigen.
+
 ##### `GET /inserate` and `GET /inserate-detailed`
+
+The response below documents the historical synchronous API. `/inserate` now
+returns the job submission shape above and `/inserate-detailed` returns `410`.
 
 ```json
 {
@@ -509,6 +739,8 @@ curl -X POST http://localhost:8000/convert-url \
 The `/inserate-detailed` response additionally nests a `details` object inside each listing with full description, seller info, and location.
 
 ##### `POST /inserate-by-url`
+
+The response below is historical. This adapter now returns a search-job record.
 
 ```json
 {
@@ -561,6 +793,10 @@ The `/inserate-detailed` response additionally nests a `details` object inside e
 
 ## 📊 Performance Benchmarks
 
+> **Historical:** These figures predate durable jobs and the conservative
+> process-wide 3-second start interval. They are not latency targets for the
+> current job API. Backlog changes ETA, never job correctness or retention.
+
 Performance tests conducted on **Arch Linux** with **Intel i7-1260P** processor:
 
 | Endpoint | Operation | Avg Time | Min Time | Max Time | Success Rate | Results |
@@ -593,8 +829,10 @@ Performance tests conducted on **Arch Linux** with **Intel i7-1260P** processor:
 
 - **Clean API Responses**: Minimal overhead with essential data only
 - **Resource Management**: Automatic cleanup and efficient resource usage
-- **Scalable Architecture**: Handles concurrent requests efficiently
-- **Docker Optimized**: Fast container builds with uv package manager
+- **Durable single-process architecture**: Queues concurrent submissions without
+  multiplying outbound browser activity
+- **Docker packaging**: Installs production dependencies with pip and bundles
+  Playwright Chromium
 
 API documentation is available at `http://localhost:8000/docs` when running locally.
 
@@ -605,6 +843,11 @@ Distributed under the MIT License. See `LICENSE` for more information.
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Changelog
+
+> **Historical API note:** The dated entries below describe the synchronous API
+> as it behaved at that time. The current scraping endpoints return durable job
+> records (or, for `/inserate-detailed`, `410 Gone`); wording such as "now" and
+> "after" in these entries is relative to the dated release, not the current API.
 
 ### May 2026 — Multi-image fetching, deleted-ad detection, media response restructure ⚠️ Breaking
 

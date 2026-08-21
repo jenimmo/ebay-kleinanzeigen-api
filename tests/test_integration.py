@@ -14,13 +14,27 @@ import asyncio
 import time
 import statistics
 import aiohttp
+import pytest
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+
+
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skip(
+        reason=(
+            "Historische parallele Live-Last; durch den konservativen persistenten "
+            "Job-Vertragstest ersetzt"
+        )
+    ),
+]
 
 
 @dataclass
 class TestResult:
     """Test result with performance metrics"""
+
+    __test__ = False
 
     endpoint: str
     success: bool
@@ -33,6 +47,8 @@ class TestResult:
 @dataclass
 class ConcurrentTestResult:
     """Results from concurrent testing"""
+
+    __test__ = False
 
     total_requests: int
     successful_requests: int
@@ -333,8 +349,8 @@ async def test_inserate_endpoint_functionality():
         expected_perf_fields = [
             "pages_requested",
             "pages_successful",
-            "concurrent_level",
-            "page_details",
+            "success_rate",
+            "average_page_time",
         ]
         for field in expected_perf_fields:
             assert field in perf_metrics, f"Missing performance metric: {field}"

@@ -1,4 +1,46 @@
-# Load Testing Framework
+# Tests
+
+## Pytest-Suite
+
+Der normale Testlauf ist vollständig offline. Tests, die einen laufenden API-Server
+benötigen oder Kleinanzeigen aufrufen können, tragen den Marker `live` und werden
+standardmäßig übersprungen:
+
+```bash
+pytest
+```
+
+Live-Tests müssen ausdrücklich aktiviert werden. Dazu zuerst den API-Server starten
+und anschließend den Opt-in-Schalter verwenden:
+
+```bash
+uvicorn main:app
+pytest --run-live -m live
+```
+
+Die kanonische Live-Suite liegt in `test_persistent_jobs_live.py`. Sie reicht pro
+UTC-Tag dank stabiler `Idempotency-Key`-Werte höchstens einen schmalen Suchjob und
+einen Detailjob ein. Alle Tests teilen diese beiden Jobs, fragen ihren Status ab
+und lesen Ergebnisse anschließend aus SQLite. Es gibt absichtlich keine
+parallelen Live-Anfragen und keinen Live-Lasttest. Die testseitige Polling-Grenze
+beträgt standardmäßig 900 Sekunden; sie kann mit
+`KLEINANZEIGEN_LIVE_POLL_TIMEOUT_SECONDS` angepasst werden und verwirft den
+serverseitig angenommenen Job nicht. Eine abweichende lokale API-Adresse kann
+mit `KLEINANZEIGEN_LIVE_BASE_URL` gesetzt werden.
+
+Die früheren synchronen Live-Suiten bleiben nur als historische Referenz erhalten
+und sind auch mit `--run-live` explizit übersprungen. Ihre Annahmen zu synchronen
+`200`-Antworten, Seitenzahlen und paralleler Last gelten für die persistente
+Job-API nicht mehr.
+
+Mit `pytest --markers` lässt sich die registrierte Marker-Beschreibung anzeigen.
+
+## Historisches Load Testing Framework
+
+> **Nicht gegen Kleinanzeigen ausführen.** Die folgenden Skripte stammen aus der
+> früheren synchronen Architektur und sind kein Abnahmetest der persistenten
+> Job-API. Parallelität und Fairness werden ausschließlich offline mit Fake-Browsern
+> getestet.
 
 This directory contains a comprehensive load testing framework for validating the Kleinanzeigen API performance optimizations. The framework simulates multiple concurrent users making API requests and provides detailed performance analysis.
 

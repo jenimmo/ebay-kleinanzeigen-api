@@ -10,93 +10,55 @@ This test validates:
 
 import asyncio
 import aiohttp
-import time
+import pytest
 
 
-async def test_api_health(base_url: str = "http://localhost:8000"):
-    """Test API health and optimization status"""
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skip(
+        reason=(
+            "Historischer Health-Runner; durch test_persistent_jobs_live.py ersetzt"
+        )
+    ),
+]
+
+
+async def check_api_health(base_url: str = "http://localhost:8000") -> bool:
+    """Test API readiness without triggering a Kleinanzeigen scrape."""
     print("Testing API health and optimization status...")
 
-    async with aiohttp.ClientSession() as session:
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
-            # Test 1: Root endpoint
             print("  Testing root endpoint...", end=" ")
             async with session.get(f"{base_url}/") as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("browser_status") == "optimized":
-                        print("✅ OK (optimized)")
-                    else:
-                        print(
-                            f"⚠️  Browser status: {data.get('browser_status', 'unknown')}"
-                        )
-                        return False
-                else:
+                if response.status != 200:
                     print(f"❌ HTTP {response.status}")
                     return False
+                root_data = await response.json()
+                if root_data.get("browser_status") != "optimized":
+                    print(
+                        f"⚠️  Browser status: {root_data.get('browser_status', 'unknown')}"
+                    )
+                    return False
+                if "/health" not in root_data.get("endpoints", []):
+                    print("⚠️  /health missing from endpoint list")
+                    return False
+                print("✅ OK (optimized)")
 
-            # Test 2: Inserate endpoint basic functionality
-            print("  Testing /inserate endpoint...", end=" ")
-            start_time = time.time()
-            async with session.get(
-                f"{base_url}/inserate", params={"query": "test", "page_count": 1}
-            ) as response:
-                response_time = time.time() - start_time
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("success"):
-                        print(f"✅ OK ({response_time:.3f}s)")
-                    else:
-                        print(f"⚠️  Success: {data.get('success')}")
-                        return False
-                else:
+            print("  Testing readiness endpoint...", end=" ")
+            async with session.get(f"{base_url}/health") as response:
+                if response.status != 200:
                     print(f"❌ HTTP {response.status}")
                     return False
-
-            # Test 3: Inserate-detailed endpoint
-            print("  Testing /inserate-detailed endpoint...", end=" ")
-            start_time = time.time()
-            async with session.get(
-                f"{base_url}/inserate-detailed",
-                params={"query": "test", "page_count": 1},
-            ) as response:
-                response_time = time.time() - start_time
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("success"):
-                        print(f"✅ OK ({response_time:.3f}s)")
-                    else:
-                        print(f"⚠️  Success: {data.get('success')}")
-                        return False
-                else:
-                    print(f"❌ HTTP {response.status}")
+                health_data = await response.json()
+                if health_data != {
+                    "status": "healthy",
+                    "browser_status": "optimized",
+                }:
+                    print(f"⚠️  Unexpected body: {health_data}")
                     return False
-
-            # Test 4: Performance metrics presence
-            print("  Checking performance metrics...", end=" ")
-            async with session.get(
-                f"{base_url}/inserate", params={"query": "laptop", "page_count": 2}
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if "performance_metrics" in data:
-                        perf_metrics = data["performance_metrics"]
-                        required_fields = [
-                            "pages_requested",
-                            "pages_successful",
-                            "concurrent_level",
-                        ]
-                        if all(field in perf_metrics for field in required_fields):
-                            print("✅ OK")
-                        else:
-                            print("⚠️  Missing performance metric fields")
-                            return False
-                    else:
-                        print("⚠️  No performance metrics in response")
-                        return False
-                else:
-                    print(f"❌ HTTP {response.status}")
-                    return False
+                print("✅ OK")
 
             print("\n✅ API health check passed - All systems operational!")
             return True
@@ -106,13 +68,18 @@ async def test_api_health(base_url: str = "http://localhost:8000"):
             return False
 
 
+async def test_api_health():
+    """Pytest-Einstiegspunkt ohne versehentlich angeforderte ``base_url``-Fixture."""
+    assert await check_api_health()
+
+
 async def main():
     """Run API health check"""
     print("=" * 60)
     print("API HEALTH CHECK")
     print("=" * 60)
 
-    success = await test_api_health()
+    success = await check_api_health()
 
     if success:
         print("\n🎉 API is healthy and ready for integration tests!")

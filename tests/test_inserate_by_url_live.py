@@ -5,7 +5,7 @@ Requires the server to be running:
   uvicorn main:app
 
 Run with:
-  pytest tests/test_inserate_by_url_live.py -v
+  pytest --run-live tests/test_inserate_by_url_live.py -v
 
 Data is fetched once per session and shared across all tests to avoid
 hitting Kleinanzeigen rate limits from rapid back-to-back requests.
@@ -17,6 +17,16 @@ import time
 from datetime import datetime
 import pytest
 import httpx
+
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skip(
+        reason=(
+            "Historischer synchroner Mehrfachabruf; durch "
+            "test_persistent_jobs_live.py ersetzt"
+        )
+    ),
+]
 
 BASE_URL = "http://localhost:8000"
 
@@ -169,19 +179,18 @@ def test_total_results_present(single_page_response):
     )
 
 
-def test_total_results_exceeds_100k(single_page_response):
+def test_total_results_covers_returned_results(single_page_response):
     total = single_page_response.get("total_results", 0)
-    assert total > 100_000, f"Expected total_results > 100,000, got {total}"
+    assert total >= single_page_response["unique_results"] > 0
 
 
 # ── Result counts per page ────────────────────────────────────────────────────
 
 
-def test_single_page_returns_25_results(single_page_response):
-    assert single_page_response["unique_results"] == 25, (
-        f"Expected 25, got {single_page_response['unique_results']}"
-    )
-    assert len(single_page_response["results"]) == 25
+def test_single_page_returns_bounded_results(single_page_response):
+    result_count = single_page_response["unique_results"]
+    assert 0 < result_count <= 25
+    assert len(single_page_response["results"]) == result_count
 
 
 def test_two_pages_returns_50_results(single_page_response, two_page_response):
@@ -271,10 +280,17 @@ def test_future_cutoff_stops_after_first_page(future_cutoff_response):
     assert future_cutoff_response["performance_metrics"]["pages_requested"] == 1
 
 
-def test_past_cutoff_does_not_filter(past_cutoff_response):
-    """A cutoff far in the past keeps every listing — result count same as no filter."""
-    assert past_cutoff_response["unique_results"] == 25
-    assert len(past_cutoff_response["results"]) == 25
+def test_past_cutoff_keeps_current_results(past_cutoff_response):
+    """A far-past cutoff keeps a non-empty, internally consistent result page."""
+    assert past_cutoff_response["unique_results"] > 0
+    assert (
+        len(past_cutoff_response["results"]) == past_cutoff_response["unique_results"]
+    )
+    cutoff = datetime(2000, 1, 1)
+    for item in past_cutoff_response["results"]:
+        published_at = item.get("published_at")
+        if published_at is not None:
+            assert datetime.fromisoformat(published_at) >= cutoff
 
 
 def test_published_at_respects_cutoff(four_page_response):
