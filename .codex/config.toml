@@ -1,0 +1,6 @@
+[mcp_servers.kleinanzeigen]
+command = "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp"
+args = []
+cwd = "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API"
+startup_timeout_sec = 120
+tool_timeout_sec = 900

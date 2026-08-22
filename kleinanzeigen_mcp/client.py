@@ -8,10 +8,11 @@ transport concerns.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 import math
 import re
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 from urllib.parse import quote, urlsplit
 
 import httpx
@@ -21,6 +22,7 @@ from .models import JobAccepted, JobResultsPage, JobStatus
 
 
 _ResponseModel = TypeVar("_ResponseModel", bound=BaseModel)
+BaseUrlProvider = Callable[[bool], str]
 _SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]+")
 _URL_IN_MESSAGE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
@@ -80,13 +82,17 @@ class KleinanzeigenJobClient:
 
     def __init__(
         self,
-        base_url: str,
+        base_url: str | None = None,
         *,
         timeout: float = 30.0,
         headers: Mapping[str, str] | None = None,
         client: httpx.AsyncClient | None = None,
+        base_url_provider: BaseUrlProvider | None = None,
     ) -> None:
-        self._base_url = _validate_base_url(base_url)
+        if base_url is None and base_url_provider is None:
+            raise ValueError("base_url or base_url_provider is required")
+        self._base_url = _validate_base_url(base_url) if base_url is not None else None
+        self._base_url_provider = base_url_provider
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise ValueError("timeout must be a positive number")
         if not math.isfinite(float(timeout)) or timeout <= 0:
@@ -294,31 +300,58 @@ class KleinanzeigenJobClient:
     ) -> httpx.Response:
         _assert_jobs_path(path)
         request_headers = {**self._headers, **dict(headers or {})}
+        base_url = await self._resolve_base_url(refresh=False)
         try:
             response = await self._client.request(
                 method,
-                f"{self._base_url}{path}",
+                f"{base_url}{path}",
                 json=json,
                 params=params,
                 headers=request_headers,
                 timeout=self._timeout,
             )
-        except httpx.TimeoutException as exc:
-            raise KleinanzeigenTransportError(
-                code="transport_timeout",
-                message="The jobs API request timed out",
-                retryable=True,
-            ) from exc
         except httpx.RequestError as exc:
-            raise KleinanzeigenTransportError(
-                code="transport_error",
-                message="The jobs API could not be reached",
-                retryable=True,
-            ) from exc
+            if self._base_url_provider is None:
+                raise _transport_error(exc) from exc
+            recovered_base_url = await self._resolve_base_url(refresh=True)
+            if not _request_is_safe_to_retry(method, path, request_headers):
+                # Refresh the cached backend for subsequent calls, but never
+                # repeat a creation whose outcome may be unknown.
+                raise _transport_error(exc) from exc
+            try:
+                response = await self._client.request(
+                    method,
+                    f"{recovered_base_url}{path}",
+                    json=json,
+                    params=params,
+                    headers=request_headers,
+                    timeout=self._timeout,
+                )
+            except httpx.RequestError as retry_exc:
+                raise _transport_error(retry_exc) from retry_exc
 
         if not 200 <= response.status_code < 300:
             raise _api_error(response)
         return response
+
+    async def _resolve_base_url(self, *, refresh: bool) -> str:
+        if self._base_url_provider is None:
+            if self._base_url is None:  # pragma: no cover - constructor invariant
+                raise RuntimeError("jobs API base URL is unavailable")
+            return self._base_url
+        if self._base_url is not None and not refresh:
+            return self._base_url
+        try:
+            provided = await asyncio.to_thread(self._base_url_provider, refresh)
+            resolved = _validate_base_url(provided)
+        except Exception as exc:
+            raise KleinanzeigenTransportError(
+                code="transport_error",
+                message="The local jobs API could not be started",
+                retryable=True,
+            ) from exc
+        self._base_url = resolved
+        return resolved
 
 
 def _validate_base_url(value: str) -> str:
@@ -371,6 +404,36 @@ def _idempotency_headers(value: str | None) -> dict[str, str]:
 
 def _invalid_argument(message: str) -> KleinanzeigenClientError:
     return KleinanzeigenClientError(code="invalid_argument", message=message)
+
+
+def _transport_error(exc: httpx.RequestError) -> KleinanzeigenTransportError:
+    if isinstance(exc, httpx.TimeoutException):
+        return KleinanzeigenTransportError(
+            code="transport_timeout",
+            message="The jobs API request timed out",
+            retryable=True,
+        )
+    return KleinanzeigenTransportError(
+        code="transport_error",
+        message="The jobs API could not be reached",
+        retryable=True,
+    )
+
+
+def _request_is_safe_to_retry(
+    method: str,
+    path: str,
+    headers: Mapping[str, str],
+) -> bool:
+    normalized_method = method.upper()
+    if normalized_method in {"GET", "HEAD", "OPTIONS", "DELETE"}:
+        return True
+    if normalized_method != "POST":
+        return False
+    if path.endswith(("/continue", "/resume")):
+        # These endpoints consume exact opaque tokens idempotently.
+        return True
+    return any(name.lower() == "idempotency-key" for name in headers)
 
 
 def _api_error(response: httpx.Response) -> KleinanzeigenAPIError:

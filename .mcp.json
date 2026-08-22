@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "kleinanzeigen": {
+      "type": "stdio",
+      "command": "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp",
+      "args": [],
+      "timeout": 900000
+    }
+  }
+}

@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from utils.input_validation import normalize_listing_id
 from utils.http_security import LoopbackOnlyMiddleware
 
-from .client import KleinanzeigenClientError, KleinanzeigenJobClient
+from .client import BaseUrlProvider, KleinanzeigenClientError, KleinanzeigenJobClient
 from .models import JobResultItem, JobStatus, WaitProgress
 from .waiter import collect_search_results, wait_for_job
 
@@ -39,24 +39,100 @@ MCP_HTTP_SESSION_IDLE_TIMEOUT_SECONDS = 15 * 60.0
 MAX_MERGE_SOURCE_JOBS = 32
 MAX_MERGE_SNAPSHOT_ITEMS = 10_000
 SERVER_INSTRUCTIONS = (
-    "Beginne mit search_listings. Es liefert alle freigegebenen Kandidaten bis "
-    "200. Wenn alle Kandidaten verlangt sind und continuation.required gesetzt "
-    "ist, rufe continue_search mit exakt Token und Cursor auf, bis die Suche "
-    "vollständig ist. Rufe Details nur für explizit ausgewählte IDs ab. "
-    "Timeouts und Cooldowns bedeuten nicht, dass ein Job abgeschlossen ist. "
-    "merge_search_results führt parallele Suchjobs ohne neue Browserzugriffe "
-    "stabil nach listing_id zusammen."
+    "Nutze search_listings als Einstieg, wenn Inserate oder Angebote auf "
+    "Kleinanzeigen gesucht werden. Es liefert alle freigegebenen Kandidaten bis "
+    "200. Wenn alle Kandidaten verlangt sind und continuation.required=true ist, "
+    "rufe continue_search mit exakt continuation.token und dem vorherigen "
+    "next_cursor auf, bis die Suche vollständig ist. Vervollständige bei mehreren "
+    "parallelen Suchjobs bei Bedarf jede Quelle und führe sie anschließend mit "
+    "merge_search_results in der gewünschten Prioritätsreihenfolge zusammen; die "
+    "erste Quelle liefert bei Duplikaten die kanonischen Daten. Ein Merge-Cursor "
+    "bleibt an seinen Snapshot gebunden; starte nach einer späteren "
+    "Quellenfortsetzung einen neuen Merge ohne Cursor. Rufe get_listing_details "
+    "nur für explizit ausgewählte listing_ids auf. Folge bei laufenden Jobs, "
+    "weiteren Ergebnisseiten und needs_attention dem ausgegebenen next_action und "
+    "übernimm Token und Cursor exakt. Timeouts und Cooldowns beenden oder "
+    "stornieren persistente Jobs nicht; starte dann keinen identischen Job neu. "
+    "Verwende cancel_job nur, wenn die Arbeit wirklich abgebrochen werden soll."
 )
 
 _IDEMPOTENCY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
 _HEAVY_RESULT_META = {"anthropic/maxResultSizeChars": ANTHROPIC_MAX_RESULT_CHARS}
 
-JobId = Annotated[str, Field(min_length=1, max_length=128)]
-Token = Annotated[str, Field(min_length=1, max_length=512)]
-ApiCursor = Annotated[str, Field(min_length=1, max_length=512)]
+JobId = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=128,
+        description=(
+            "Exakte persistente job_id aus einem vorherigen Toolergebnis; "
+            "unverändert übernehmen und nicht selbst konstruieren."
+        ),
+    ),
+]
+ContinuationToken = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=512,
+        description=(
+            "Opaques Token exakt aus job.continuation.token; nur verwenden, wenn "
+            "continuation.required=true ist. Nicht verändern und nicht mit "
+            "anderen Jobs oder Revisionen mischen."
+        ),
+    ),
+]
+ResumeToken = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=512,
+        description=(
+            "Opaques Token exakt aus job.resume.token; nur bei "
+            "resume.required=true und state=needs_attention verwenden. Derselbe "
+            "Token ist retry-sicher, autorisiert aber keinen späteren "
+            "Attention-Zyklus."
+        ),
+    ),
+]
+ContinuationCursor = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=512,
+        description=(
+            "Opaquer Ergebnisanker exakt aus next_cursor der vorherigen "
+            "Suchtranche. Muss zum selben Job und continuation_token gehören; "
+            "kein Merge-Cursor. Dasselbe Token-Cursor-Paar darf sicher "
+            "wiederholt werden."
+        ),
+    ),
+]
+ResultCursor = Annotated[str, Field(min_length=1, max_length=512)]
 MergeCursor = Annotated[str, Field(min_length=1, max_length=65_536)]
-WaitSeconds = Annotated[float, Field(ge=0, le=DEFAULT_WAIT_SECONDS)]
-PageLimit = Annotated[int, Field(ge=1, le=MAX_RESULT_ITEMS)]
+WaitSeconds = Annotated[
+    float,
+    Field(
+        ge=0,
+        le=DEFAULT_WAIT_SECONDS,
+        description=(
+            "Lokale Wartezeit in Sekunden von 0 bis 600. Begrenzt nur diesen "
+            "Toolaufruf; der persistente Job läuft bei einem Timeout weiter. "
+            "0 liest mindestens den aktuellen Status ohne weiteres Warten."
+        ),
+    ),
+]
+PageLimit = Annotated[
+    int,
+    Field(
+        ge=1,
+        le=MAX_RESULT_ITEMS,
+        description=(
+            "Gewünschte maximale Anzahl Ergebnisobjekte dieser Seite von 1 bis "
+            "200; Standard ist 200."
+        ),
+    ),
+]
 IdempotencyKey = Annotated[
     str,
     Field(min_length=1, max_length=128, pattern=_IDEMPOTENCY_PATTERN),
@@ -209,6 +285,8 @@ _TOOL_OUTPUT_TYPES: dict[str, type[_ToolOutput]] = {
 
 def network_client_factory(
     base_url: str | None = None,
+    *,
+    base_url_provider: BaseUrlProvider | None = None,
 ) -> ClientContextFactory:
     """Create clients for the STDIO adapter without importing the API app."""
 
@@ -217,8 +295,12 @@ def network_client_factory(
         resolved = base_url or os.environ.get(
             "KLEINANZEIGEN_API_BASE_URL", "http://127.0.0.1:8000"
         )
-        async with httpx.AsyncClient() as http_client:
-            yield KleinanzeigenJobClient(resolved, client=http_client)
+        async with httpx.AsyncClient(trust_env=False) as http_client:
+            yield KleinanzeigenJobClient(
+                resolved if base_url_provider is None else base_url,
+                client=http_client,
+                base_url_provider=base_url_provider,
+            )
 
     return factory
 
@@ -332,7 +414,12 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
     server = MCPServer(
         name="kleinanzeigen",
         title="Kleinanzeigen Agent",
-        description="Lokale, persistente Suche und Detailanalyse für Kleinanzeigen.",
+        description=(
+            "Lokaler MCP-Server für die Suche nach Inseraten, gebrauchten Artikeln "
+            "und Fahrzeugen auf Kleinanzeigen.de, das Zusammenführen paralleler "
+            "Suchen und den Abruf vollständiger Inserat- und Verkäuferdetails "
+            "über persistente Browserjobs."
+        ),
         instructions=SERVER_INSTRUCTIONS,
         version="0.1.0",
         lifespan=lifespan,
@@ -343,24 +430,108 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
         name="search_listings",
         title="Kleinanzeigen durchsuchen",
         description=(
-            "Startet eine persistente Kleinanzeigen-Suche per vollständiger URL "
-            "oder strukturierten Filtern, wartet begrenzt und liefert alle aktuell "
-            "freigegebenen vollständigen Suchkarten bis maximal 200. Setzt eine "
-            "Suche niemals automatisch fort."
+            "Nutze dieses Tool als Einstieg, wenn der Nutzer Inserate oder "
+            "Kaufangebote auf Kleinanzeigen finden möchte. Es startet per Browser "
+            "einen persistenten Suchjob mit vollständiger Such-URL oder "
+            "strukturierten Filtern, wartet höchstens wait_timeout_seconds und "
+            "liefert alle freigegebenen vollständigen Suchkarten bis 200. Bei "
+            "timed_out=true läuft der Job weiter: nicht neu starten, sondern "
+            "next_action folgen. Weitere Tranches werden nie automatisch "
+            "freigegeben."
         ),
         annotations=_annotations(open_world=True),
         meta=_HEAVY_RESULT_META,
     )
     async def search_listings(
         ctx: Context,
-        url: Annotated[str | None, Field(min_length=1, max_length=4096)] = None,
-        query: Annotated[str | None, Field(max_length=512)] = None,
-        location: Annotated[str | None, Field(max_length=512)] = None,
-        radius: Annotated[int | None, Field(ge=0)] = None,
-        min_price: Annotated[int | None, Field(ge=0)] = None,
-        max_price: Annotated[int | None, Field(ge=0)] = None,
-        min_publish_date: datetime | None = None,
-        idempotency_key: IdempotencyKey | None = None,
+        url: Annotated[
+            str | None,
+            Field(
+                min_length=1,
+                max_length=4096,
+                description=(
+                    "Vollständige Kleinanzeigen-Such-URL unter "
+                    "https://kleinanzeigen.de oder https://www.kleinanzeigen.de "
+                    "einschließlich gewünschter Kategorie und Filter. Nicht mit "
+                    "query, location, radius, min_price oder max_price "
+                    "kombinieren; min_publish_date darf zusätzlich gesetzt werden."
+                ),
+            ),
+        ] = None,
+        query: Annotated[
+            str | None,
+            Field(
+                max_length=512,
+                description=(
+                    "Freier Suchbegriff für eine strukturierte Suche. Nicht "
+                    "zusammen mit url verwenden; weglassen statt leer übergeben."
+                ),
+            ),
+        ] = None,
+        location: Annotated[
+            str | None,
+            Field(
+                max_length=512,
+                description=(
+                    "Von Kleinanzeigen verstandener Ort oder Postleitzahl für die "
+                    "strukturierte Suche. Nicht zusammen mit url verwenden."
+                ),
+            ),
+        ] = None,
+        radius: Annotated[
+            int | None,
+            Field(
+                ge=0,
+                description=(
+                    "Nichtnegativer Suchradius in Kilometern um location. Nicht "
+                    "zusammen mit url verwenden."
+                ),
+            ),
+        ] = None,
+        min_price: Annotated[
+            int | None,
+            Field(
+                ge=0,
+                description=(
+                    "Nichtnegativer Mindestpreis in ganzen Euro. Nicht zusammen "
+                    "mit url verwenden; darf max_price nicht überschreiten."
+                ),
+            ),
+        ] = None,
+        max_price: Annotated[
+            int | None,
+            Field(
+                ge=0,
+                description=(
+                    "Nichtnegativer Höchstpreis in ganzen Euro. Nicht zusammen "
+                    "mit url verwenden; darf min_price nicht unterschreiten."
+                ),
+            ),
+        ] = None,
+        min_publish_date: Annotated[
+            datetime | None,
+            Field(
+                description=(
+                    "Inklusive Veröffentlichungs-Untergrenze als "
+                    "ISO-8601-Zeitstempel. Zeitstempel ohne Offset gelten als "
+                    "Europe/Berlin; Zeitstempel mit Offset werden entsprechend "
+                    "umgerechnet. Ältere Karten werden entfernt, Karten ohne "
+                    "erkannten Zeitpunkt bleiben enthalten. Darf auch mit url "
+                    "verwendet werden."
+                )
+            ),
+        ] = None,
+        idempotency_key: Annotated[
+            IdempotencyKey | None,
+            Field(
+                description=(
+                    "Optionaler stabiler Schlüssel für bewusste Wiederholungen "
+                    "desselben Suchjob-Starts. Nie für andere Argumente oder einen "
+                    "anderen Jobtyp wiederverwenden. Normalerweise weglassen; der "
+                    "Server erzeugt und liefert dann einen Schlüssel."
+                )
+            ),
+        ] = None,
         wait_timeout_seconds: WaitSeconds = DEFAULT_WAIT_SECONDS,
     ) -> Annotated[CallToolResult, SearchToolOutput]:
         try:
@@ -408,9 +579,13 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
         name="continue_search",
         title="Suche fortsetzen",
         description=(
-            "Autorisiert mit dem exakten Token genau eine weitere Tranche von "
-            "höchstens 200 Suchtreffern. after_cursor muss der Ergebnisanker der "
-            "vorigen Tranche sein; derselbe Token und Cursor sind retry-sicher."
+            "Nutze dieses Tool nur, wenn alle Kandidaten verlangt sind und der "
+            "Suchjob continuation.required=true meldet. Übergib dessen exakte "
+            "job_id, continuation.token und das next_cursor der vorherigen "
+            "Tranche; dadurch wird genau die nächste Tranche mit höchstens 200 "
+            "neuen Treffern autorisiert und gegebenenfalls Browserarbeit "
+            "gestartet. Dieselbe Token-Cursor-Kombination ist retry-sicher. Bei "
+            "einem Timeout läuft der Job weiter."
         ),
         annotations=_annotations(idempotent=True, open_world=True),
         meta=_HEAVY_RESULT_META,
@@ -418,8 +593,8 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
     async def continue_search(
         ctx: Context,
         job_id: JobId,
-        continuation_token: Token,
-        after_cursor: ApiCursor,
+        continuation_token: ContinuationToken,
+        after_cursor: ContinuationCursor,
         wait_timeout_seconds: WaitSeconds = DEFAULT_WAIT_SECONDS,
     ) -> Annotated[CallToolResult, SearchToolOutput]:
         try:
@@ -457,9 +632,13 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
         name="merge_search_results",
         title="Parallele Suchen zusammenführen",
         description=(
-            "Führt die aktuell persistierten Treffer geordneter Suchjobs ohne "
-            "Browserzugriff zusammen. Dedupliziert ausschließlich nach listing_id; "
-            "die erste Quelle gewinnt und alle source_job_ids bleiben erhalten."
+            "Nutze dieses Tool, um Ergebnisse mehrerer paralleler Suchjobs lokal "
+            "zusammenzuführen. Es verursacht keinen Browserzugriff, behält die "
+            "Reihenfolge der Quellen bei, dedupliziert nach listing_id und nutzt "
+            "bei Überschneidungen die Daten der ersten Quelle; alle Fundstellen "
+            "bleiben in source_job_ids erhalten. Seiten desselben Snapshots sind "
+            "retry-sicher. Nach einer späteren Quellenfortsetzung einen neuen "
+            "Merge ohne Cursor beginnen."
         ),
         annotations=_annotations(read_only=True, idempotent=True),
         meta=_HEAVY_RESULT_META,
@@ -467,9 +646,30 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
     async def merge_search_results(
         ctx: Context,
         search_job_ids: Annotated[
-            list[JobId], Field(min_length=1, max_length=MAX_MERGE_SOURCE_JOBS)
+            list[JobId],
+            Field(
+                min_length=1,
+                max_length=MAX_MERGE_SOURCE_JOBS,
+                description=(
+                    "1 bis 32 eindeutige Suchjob-IDs in gewünschter "
+                    "Prioritätsreihenfolge. Nur Suchjobs angeben; bei derselben "
+                    "listing_id in mehreren Quellen liefert der zuerst genannte "
+                    "Job die kanonischen Kartendaten."
+                ),
+            ),
         ],
-        cursor: MergeCursor | None = None,
+        cursor: Annotated[
+            MergeCursor | None,
+            Field(
+                description=(
+                    "Opaques next_cursor eines vorherigen "
+                    "merge_search_results-Aufrufs. Mit exakt derselben geordneten "
+                    "search_job_ids-Liste verwenden. Weglassen, um nach späteren "
+                    "Quellfortsetzungen einen neuen Snapshot zu beginnen; kein "
+                    "Job-Ergebnis-Cursor."
+                )
+            ),
+        ] = None,
         limit: PageLimit = MAX_RESULT_ITEMS,
     ) -> Annotated[CallToolResult, MergeToolOutput]:
         try:
@@ -532,17 +732,45 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
         name="get_listing_details",
         title="Inseratdetails abrufen",
         description=(
-            "Startet einen persistenten Detailjob nur für die explizit angegebenen "
-            "Inserat-IDs. Die Liste hat keine fachliche Anzahlgrenze; Ergebnisse "
-            "werden ohne Feldkürzung cursor-paginiert."
+            "Nutze dieses Tool erst, nachdem konkrete Inserate aus Suchergebnissen "
+            "ausgewählt wurden. Es normalisiert und reihenfolgenstabil "
+            "dedupliziert die expliziten listing_ids, startet dafür einen "
+            "persistenten Browserjob und liefert vollständige Detailzustände ohne "
+            "Kürzung einzelner Objekte. Bei timed_out=true oder weiteren Seiten "
+            "den bestehenden Job mit get_job_status beziehungsweise "
+            "get_job_results weiterverfolgen, nicht neu starten."
         ),
         annotations=_annotations(open_world=True),
         meta=_HEAVY_RESULT_META,
     )
     async def get_listing_details(
         ctx: Context,
-        listing_ids: Annotated[list[str], Field(min_length=1)],
-        idempotency_key: IdempotencyKey | None = None,
+        listing_ids: Annotated[
+            list[str],
+            Field(
+                min_length=1,
+                description=(
+                    "Explizit ausgewählte listing_id-Werte aus Suchtreffern, keine "
+                    "Inserat-URLs: numerische Anzeigen-ID oder kanonisches "
+                    "ad-id-category-id-location-id-Segment. Reihenfolge bleibt "
+                    "erhalten, Duplikate werden entfernt. Keine fachliche "
+                    "Anzahlgrenze; bei payload_too_large selbst in Teilmengen "
+                    "aufteilen."
+                ),
+            ),
+        ],
+        idempotency_key: Annotated[
+            IdempotencyKey | None,
+            Field(
+                description=(
+                    "Optionaler stabiler Schlüssel für bewusste Wiederholungen "
+                    "desselben Detailjob-Starts. Nie für andere Argumente oder "
+                    "einen anderen Jobtyp wiederverwenden. Normalerweise "
+                    "weglassen; der Server erzeugt und liefert dann einen "
+                    "Schlüssel."
+                )
+            ),
+        ] = None,
         wait_timeout_seconds: WaitSeconds = DEFAULT_WAIT_SECONDS,
     ) -> Annotated[CallToolResult, DetailToolOutput]:
         try:
@@ -589,8 +817,12 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
         name="get_job_status",
         title="Jobstatus lesen",
         description=(
-            "Liest den persistenten Jobstatus einschließlich Fortschritt, Cooldown "
-            "und der exakten Continue-/Resume-Token. Verursacht keinen Browserzugriff."
+            "Nutze dieses Tool, um einen gestarteten Such- oder Detailjob nach "
+            "einem Timeout, während eines Cooldowns oder bei unklarem Fortschritt "
+            "zu prüfen. Es liest ausschließlich den persistenten lokalen Zustand "
+            "einschließlich Fortschritt, Ergebnismengen, Continue-/Resume-Token "
+            "und nächster Aktion; es verursacht keinen Browserzugriff und ist "
+            "retry-sicher."
         ),
         annotations=_annotations(read_only=True, idempotent=True),
     )
@@ -613,9 +845,13 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
         name="get_job_results",
         title="Persistierte Jobergebnisse lesen",
         description=(
-            "Liest eine persistierte Ergebnisseite. Suchresultate sind immutable; "
-            "laufende Detailresultate sind ein Change-Feed und können dieselbe "
-            "listing_id mit neuerem Zustand erneut enthalten."
+            "Nutze dieses Tool, um Ergebnisse eines vorhandenen Jobs seitenweise "
+            "zu lesen, insbesondere nach timed_out=true oder solange has_more=true "
+            "ist. Es verursacht keinen Browserzugriff. Suchresultate sind "
+            "unveränderlich; laufende Detailjobs liefern einen Change-Feed mit "
+            "möglicherweise wiederholter listing_id, während ein terminaler "
+            "Detailjob ohne Cursor den aktuellen Snapshot liefert. Folge nur bei "
+            "has_more=true dem exakten next_cursor."
         ),
         annotations=_annotations(read_only=True, idempotent=True),
         meta=_HEAVY_RESULT_META,
@@ -623,8 +859,27 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
     async def get_job_results(
         ctx: Context,
         job_id: JobId,
-        cursor: ApiCursor | None = None,
-        limit: PageLimit = MAX_RESULT_ITEMS,
+        cursor: Annotated[
+            ResultCursor | None,
+            Field(
+                description=(
+                    "Opaques next_cursor der vorherigen get_job_results-Seite "
+                    "desselben Jobs. Exakt übernehmen und niemals selbst "
+                    "konstruieren; für die erste Seite beziehungsweise einen "
+                    "aktuellen terminalen Detail-Snapshot weglassen."
+                )
+            ),
+        ] = None,
+        limit: Annotated[
+            PageLimit,
+            Field(
+                description=(
+                    "Gewünschte maximale Anzahl Ergebnisobjekte von 1 bis 200. "
+                    "Bei großen Detailobjekten kann effective_limit zum Schutz "
+                    "der Antwort kleiner sein."
+                )
+            ),
+        ] = MAX_RESULT_ITEMS,
     ) -> Annotated[CallToolResult, JobResultsToolOutput]:
         try:
             client = _client(ctx)
@@ -654,15 +909,19 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
         name="resume_job",
         title="Job wiederaufnehmen",
         description=(
-            "Nimmt mit dem exakten Token genau einen needs_attention-Zyklus "
-            "idempotent wieder auf und wartet anschließend begrenzt."
+            "Nutze dieses Tool nur, wenn ein Job state=needs_attention und "
+            "resume.required=true meldet. Übergib die exakte job_id und den "
+            "ausgegebenen resume.token; dadurch wird genau ein "
+            "Wiederaufnahmezyklus autorisiert und gegebenenfalls Browserarbeit "
+            "gestartet. Derselbe Token ist retry-sicher. Bei einem Timeout läuft "
+            "der Job weiter."
         ),
         annotations=_annotations(idempotent=True, open_world=True),
     )
     async def resume_job(
         ctx: Context,
         job_id: JobId,
-        resume_token: Token,
+        resume_token: ResumeToken,
         wait_timeout_seconds: WaitSeconds = DEFAULT_WAIT_SECONDS,
     ) -> Annotated[CallToolResult, ActionToolOutput]:
         try:
@@ -684,8 +943,10 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
         name="cancel_job",
         title="Job abbrechen",
         description=(
-            "Bricht einen persistenten Job und seine laufende Browserarbeit ab. "
-            "Diese destruktive Aktion ist bei identischer Wiederholung idempotent."
+            "Nutze dieses Tool nur, wenn ein persistenter Job wirklich dauerhaft "
+            "abgebrochen werden soll. Es setzt den Job auf abgebrochen und wartet, "
+            "bis eine gerade laufende Browseroperation beendet ist. Die Aktion ist "
+            "destruktiv, aber für dieselbe job_id retry-sicher."
         ),
         annotations=_annotations(
             destructive=True,

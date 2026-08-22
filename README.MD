@@ -192,44 +192,80 @@ Redis-backed distributed queue, rate limiter, and circuit state.
 ### Local MCP server
 
 The local MCP integration is another interface to the same durable job API. It
-must not create a second browser, scheduler, or SQLite owner. Start exactly one
-FastAPI process first; Codex, Claude Code, Claude Desktop, and their subagents
-then share its browser pool, outbound limits, jobs, and persisted results.
+must not create a second browser, scheduler, or SQLite owner. The recommended
+STDIO setup lets Codex or Claude start the shared FastAPI backend automatically
+on the first actual tool call. Concurrent clients and subagents discover the
+same detached backend and therefore share its browser pool, outbound limits,
+jobs, and persisted results.
 
-#### Start the shared API manually
+#### One-time installation
 
-For MCP use, bind only to loopback, run exactly one Uvicorn worker, and do not
-use `--reload`:
+Install the project and Chromium once:
+
 
 ```sh
 cd "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API"
 uv sync --no-editable
 uv run --no-editable playwright install chromium
-uv run --no-editable uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-Keep that process running independently of the MCP client and verify readiness:
+The repository already contains the project-scoped client configurations
+`.codex/config.toml` and `.mcp.json`. Restart Codex or Claude Code after the
+one-time installation. Trust this project in Codex; Claude Code additionally
+asks once whether the checked-in MCP server is trusted. These are client
+security approvals, not server-start steps. If the repository is moved, update
+the absolute executable and working-directory paths in both files.
+
+Both clients then launch this STDIO command themselves:
 
 ```sh
+/Users/matthias/Documents/ChatGPT/Kleinanzeigen\ API/.venv/bin/kleinanzeigen-mcp
+```
+
+The MCP handshake and tool discovery complete without waiting for Chromium.
+The first actual tool call reuses a healthy compatible backend when one exists.
+If none exists, it reserves a free `127.0.0.1` port, acquires a cross-process
+startup lock, starts exactly one detached Uvicorn process with one worker, and
+waits for backend readiness up to the configured startup timeout.
+Uvicorn output is written to a private rotating log instead of MCP `stdout`.
+Closing the client stops only its STDIO adapter: the shared backend and accepted
+jobs continue running for other clients and later sessions. If that backend
+later exits, an existing STDIO session safely resolves or starts it once more
+and retries the idempotent job operation exactly once.
+
+Runtime discovery data, the startup lock, and backend log are stored under
+`data/.mcp-runtime/` by default. They contain no MCP results. The launcher never
+signals, replaces, or adopts an incompatible process which already owns an
+explicit address.
+
+The relevant launcher settings are:
+
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| `KLEINANZEIGEN_MCP_AUTOSTART` | `true` | Start or discover the shared local backend for STDIO. Set to `false` for a separately managed API. |
+| `KLEINANZEIGEN_MCP_STARTUP_TIMEOUT_SECONDS` | `90` | Maximum wait for the startup lock and backend readiness. |
+| `KLEINANZEIGEN_MCP_HEALTH_TIMEOUT_SECONDS` | `2` | Timeout for an individual local compatibility/readiness probe. |
+| `KLEINANZEIGEN_MCP_RUNTIME_DIR` | `data/.mcp-runtime` | Absolute override for state, lock, and the default log. |
+| `KLEINANZEIGEN_MCP_BACKEND_LOG_PATH` | `backend.log` in the runtime directory | Absolute path or runtime-directory-relative backend log path. |
+| `KLEINANZEIGEN_MCP_BACKEND_LOG_MAX_BYTES` | `1048576` | Rotate the backend log at the next start after this size is reached. |
+| `KLEINANZEIGEN_MCP_BACKEND_DIRECTORY` | detected project root | Absolute working directory containing `main.py`. |
+| `KLEINANZEIGEN_API_BASE_URL` | dynamically discovered | Reuse or start one explicit compatible loopback API; with autostart disabled, the fallback is `http://127.0.0.1:8000`. |
+
+#### Optional manually managed HTTP transport
+
+For direct HTTP MCP use, start the shared API yourself, bind only to loopback,
+run exactly one worker, and do not use `--reload`:
+
+```sh
+cd "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API"
+uv run --no-editable uvicorn main:app \
+  --host 127.0.0.1 --port 8000 --workers 1
 curl -fsS http://127.0.0.1:8000/health
 ```
 
-The standard MCP transport is Streamable HTTP at
-`http://127.0.0.1:8000/mcp`. In addition to the SDK's Host-header protection,
-the MCP route rejects non-loopback network peers even if the surrounding API
-was accidentally bound more broadly. The optional STDIO transport is started
-with:
-
-```sh
-uv run --no-editable --directory "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API" kleinanzeigen-mcp
-```
-
-After `uv sync --no-editable`, clients may instead launch the absolute executable
-`/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp`.
-The STDIO process is only an adapter to the already running API; stopping a
-client must not stop FastAPI or its accepted jobs. It uses
-`KLEINANZEIGEN_API_BASE_URL` when set and otherwise connects to
-`http://127.0.0.1:8000`.
+Streamable HTTP is then available at `http://127.0.0.1:8000/mcp`. In addition
+to the SDK's Host-header protection, the MCP route rejects non-loopback network
+peers even if the surrounding API was accidentally bound more broadly.
 
 Configure either HTTP or STDIO under the MCP name `kleinanzeigen`, not both at
 the same time. Both expose the identical eight-tool catalog and use the same
@@ -271,15 +307,30 @@ source states. It never starts browser work.
 
 #### Codex
 
-Add the standard HTTP server from the CLI:
+Use STDIO so Codex starts the adapter and, when necessary, the shared backend.
+After the project is trusted, the checked-in `.codex/config.toml` contains:
+
+```toml
+[mcp_servers.kleinanzeigen]
+command = "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp"
+cwd = "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API"
+startup_timeout_sec = 120
+tool_timeout_sec = 900
+```
+
+To make the server available outside this repository too, create the base entry
+at user scope with the CLI and then add the timeout and working directory to
+`~/.codex/config.toml`:
 
 ```sh
-codex mcp add kleinanzeigen --url http://127.0.0.1:8000/mcp
+codex mcp add kleinanzeigen -- \
+  "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp"
 codex mcp list
 ```
 
-For explicit project or user configuration, add this to `.codex/config.toml`
-or `~/.codex/config.toml`:
+Codex stores timeout values in seconds. Restart the Codex client after changing
+the configuration, then use `/mcp` to inspect the connection and eight tools.
+For a separately managed HTTP backend, replace the STDIO entry with:
 
 ```toml
 [mcp_servers.kleinanzeigen]
@@ -287,40 +338,33 @@ url = "http://127.0.0.1:8000/mcp"
 tool_timeout_sec = 900
 ```
 
-Codex stores timeout values in seconds. In the Codex TUI, use `/mcp` to inspect
-the connection and discovered tools.
-
-As a STDIO alternative, replace the URL entry above with:
-
-```toml
-[mcp_servers.kleinanzeigen]
-command = "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp"
-env = { KLEINANZEIGEN_API_BASE_URL = "http://127.0.0.1:8000" }
-tool_timeout_sec = 900
-```
-
 #### Claude Code
 
-Add the standard HTTP endpoint and set the tool timeout when starting Claude
-Code. `MCP_TOOL_TIMEOUT` is measured in milliseconds:
+The checked-in `.mcp.json` registers the auto-starting STDIO command for this
+project and sets its per-server tool-call timeout to 900,000 milliseconds.
+Confirm it once when Claude Code presents its project-server security prompt:
 
 ```sh
-claude mcp add --transport http kleinanzeigen --scope local \
-  http://127.0.0.1:8000/mcp
 claude mcp list
-
-MCP_TOOL_TIMEOUT=900000 claude
 ```
 
-Alternatively, export `MCP_TOOL_TIMEOUT=900000` in the shell environment that
-launches Claude Code. Use `/mcp` inside Claude Code to inspect the server.
-
-To use STDIO instead, remove the HTTP entry and add the installed adapter:
+To make the server available outside this repository too, register the same
+command at user scope:
 
 ```sh
-claude mcp remove kleinanzeigen
-claude mcp add --transport stdio kleinanzeigen -- \
-  "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp"
+claude mcp add-json --scope user kleinanzeigen \
+  '{"type":"stdio","command":"/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp","args":[],"timeout":900000}'
+```
+
+Use `/mcp` inside Claude Code to inspect the server. For a separately managed
+HTTP backend, remove the STDIO entry and add the HTTP endpoint instead:
+
+```sh
+claude mcp remove kleinanzeigen --scope project
+# Run this too only if the optional user-scoped entry was added:
+claude mcp remove kleinanzeigen --scope user
+claude mcp add --transport http --scope project kleinanzeigen \
+  http://127.0.0.1:8000/mcp
 ```
 
 #### Claude Desktop (classic STDIO configuration)
@@ -334,22 +378,15 @@ any other configured servers, and restart Claude Desktop:
   "mcpServers": {
     "kleinanzeigen": {
       "type": "stdio",
-      "command": "uv",
-      "args": [
-        "run",
-        "--no-editable",
-        "--directory",
-        "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API",
-        "kleinanzeigen-mcp"
-      ]
+      "command": "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp",
+      "args": []
     }
   }
 }
 ```
 
-If Claude Desktop cannot find `uv`, replace `command` with
-`/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp`
-and set `args` to `[]`. The shared FastAPI process must already be healthy.
+Restart Claude Desktop after saving. It launches the STDIO adapter itself; no
+terminal with Uvicorn has to remain open.
 
 #### Large results and client limits
 
@@ -361,7 +398,7 @@ text results up to the supported 500,000-character ceiling. Claude Code can also
 raise its general MCP output budget when needed:
 
 ```sh
-MAX_MCP_OUTPUT_TOKENS=50000 MCP_TOOL_TIMEOUT=900000 claude
+MAX_MCP_OUTPUT_TOKENS=50000 claude
 ```
 
 The metadata limit and `MAX_MCP_OUTPUT_TOKENS` are client output controls; they
@@ -379,22 +416,30 @@ Run the MCP-focused offline tests, then the complete offline suite:
 Useful checks:
 
 ```sh
-curl -fsS http://127.0.0.1:8000/health
 codex mcp list
 claude mcp list
+jq . data/.mcp-runtime/backend.json
+tail -n 100 data/.mcp-runtime/backend.log
 ```
 
-- Connection refused: start the single FastAPI process and recheck `/health`.
+- Auto-start failure: inspect `data/.mcp-runtime/backend.log`; do not start a
+  second Uvicorn process against the same SQLite database.
+- Incompatible explicit address: remove `KLEINANZEIGEN_API_BASE_URL` to use a
+  dynamically reserved port, or point it at the intended jobs API. The launcher
+  never terminates the process currently owning that address.
 - HTTP `503`: the browser or durable job manager is not ready; inspect the API
-  log and `GET /outbound-status`.
+  log. For a manually managed HTTP backend, also inspect
+  `GET /outbound-status`.
 - `Another scheduler already owns this job database`: stop the unintended
   second Uvicorn process; do not add workers or use `--reload`.
 - HTTP `413`: the MCP/REST request exceeded 64 KiB; split explicit detail IDs.
 - Missing tools: confirm the exact `/mcp` URL, restart the client, and inspect
   `codex mcp list`, `claude mcp list`, or `/mcp` in the client.
 - Tool timeout: verify `tool_timeout_sec = 900` for Codex or
-  `MCP_TOOL_TIMEOUT=900000` for Claude Code. Accepted durable jobs continue even
-  if an MCP client disconnects; reconnect and read their status/results.
+  `"timeout": 900000` on Claude Code's `kleinanzeigen` entry. The Claude
+  per-server value overrides the `MCP_TOOL_TIMEOUT` environment fallback.
+  Accepted durable jobs continue even if an MCP client disconnects; reconnect
+  and read their status/results.
 
 ### API Endpoints
 

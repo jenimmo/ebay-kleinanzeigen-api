@@ -7,6 +7,7 @@ from contextlib import suppress
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 from typing import Any
 
@@ -17,11 +18,13 @@ import pytest
 from starlette.routing import Mount, Route
 
 import main
+import kleinanzeigen_mcp.server as mcp_server_module
 from kleinanzeigen_mcp.server import (
     MCP_HTTP_SESSION_IDLE_TIMEOUT_SECONDS,
     asgi_client_factory,
     create_mcp_server,
     create_streamable_http_app,
+    network_client_factory,
 )
 
 
@@ -38,6 +41,30 @@ EXPECTED_TOOLS = {
 _HANDSHAKE_VERSION = "2025-11-25"
 _SUBPROCESS_TIMEOUT_SECONDS = 10.0
 _TEST_IDLE_TIMEOUT_SECONDS = 0.5
+
+
+@pytest.mark.asyncio
+async def test_network_client_factory_ignores_environment_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: list[dict[str, Any]] = []
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs: Any) -> None:
+            created.append(kwargs)
+
+        async def __aenter__(self) -> FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr(mcp_server_module.httpx, "AsyncClient", FakeAsyncClient)
+
+    async with network_client_factory("http://127.0.0.1:8765")():
+        pass
+
+    assert created == [{"trust_env": False}]
 
 
 async def _write_message(
@@ -64,12 +91,14 @@ def _decode_protocol_line(line: bytes) -> dict[str, Any]:
 async def _read_response(
     process: asyncio.subprocess.Process,
     request_id: int,
+    *,
+    timeout: float = _SUBPROCESS_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     assert process.stdout is not None
     for _ in range(10):
         line = await asyncio.wait_for(
             process.stdout.readline(),
-            timeout=_SUBPROCESS_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
         message = _decode_protocol_line(line)
         if message.get("id") == request_id:
@@ -91,6 +120,7 @@ async def test_installed_stdio_entrypoint_speaks_only_mcp_and_stops_on_eof() -> 
     environment.update(
         {
             "KLEINANZEIGEN_API_BASE_URL": "http://127.0.0.1:9",
+            "KLEINANZEIGEN_MCP_AUTOSTART": "0",
             "PYTHONUNBUFFERED": "1",
         }
     )
@@ -191,6 +221,202 @@ async def test_installed_stdio_entrypoint_speaks_only_mcp_and_stops_on_eof() -> 
             stderr_reader.cancel()
         with suppress(asyncio.CancelledError):
             await stderr_reader
+
+
+async def _initialize_stdio_process(
+    process: asyncio.subprocess.Process,
+    *,
+    request_id: int,
+) -> None:
+    await _write_message(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": _HANDSHAKE_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "kleinanzeigen-autostart-test",
+                    "version": "1.0",
+                },
+            },
+        },
+    )
+    initialized = await _read_response(process, request_id)
+    assert initialized["result"]["serverInfo"]["name"] == "kleinanzeigen"
+    await _write_message(
+        process,
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+    )
+
+
+async def _call_missing_job(
+    process: asyncio.subprocess.Process,
+    *,
+    request_id: int,
+) -> None:
+    await _write_message(
+        process,
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {
+                "name": "get_job_status",
+                "arguments": {"job_id": "autostart-e2e-missing-job"},
+            },
+        },
+    )
+    response = await _read_response(process, request_id, timeout=60.0)
+    result = response["result"]
+    assert result["isError"] is True
+    assert result["structuredContent"]["error"]["code"] == "job_not_found"
+
+
+async def _close_stdio_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is None and process.stdin is not None:
+        process.stdin.close()
+        await process.stdin.wait_closed()
+        await asyncio.wait_for(process.wait(), timeout=10.0)
+    assert process.returncode == 0
+    assert process.stdout is not None
+    for line in (await process.stdout.read()).splitlines():
+        _decode_protocol_line(line)
+
+
+async def _read_runtime_state(
+    state_path: Path,
+    *,
+    excluded_pid: int | None = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            await asyncio.sleep(0.05)
+            continue
+        if state.get("status") == "ready" and state.get("pid") != excluded_pid:
+            return state
+        await asyncio.sleep(0.05)
+    pytest.fail(f"no ready backend state appeared at {state_path}")
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+async def _stop_owned_backend(pid: int) -> None:
+    if not _pid_is_running(pid):
+        return
+    os.kill(pid, signal.SIGTERM)
+    deadline = asyncio.get_running_loop().time() + 15.0
+    while _pid_is_running(pid) and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+    if _pid_is_running(pid):
+        os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.live
+@pytest.mark.asyncio
+async def test_stdio_clients_autostart_share_and_recover_backend(
+    tmp_path: Path,
+) -> None:
+    """Exercise the installed command and a real Playwright/Uvicorn backend."""
+
+    executable_name = (
+        "kleinanzeigen-mcp.exe" if os.name == "nt" else "kleinanzeigen-mcp"
+    )
+    entrypoint = Path(sys.executable).with_name(executable_name)
+    runtime_dir = tmp_path / "runtime"
+    state_path = runtime_dir / "backend.json"
+    environment = os.environ.copy()
+    environment.pop("KLEINANZEIGEN_API_BASE_URL", None)
+    environment.pop("KLEINANZEIGEN_JOB_RETRY_BUDGET", None)
+    environment.update(
+        {
+            "ALL_PROXY": "http://127.0.0.1:9",
+            "HTTP_PROXY": "http://127.0.0.1:9",
+            "HTTPS_PROXY": "http://127.0.0.1:9",
+            "NO_PROXY": "",
+            "KLEINANZEIGEN_JOB_DATABASE_PATH": str(tmp_path / "jobs.sqlite3"),
+            "KLEINANZEIGEN_JOB_MIN_FREE_DISK_BYTES": "0",
+            "KLEINANZEIGEN_MCP_AUTOSTART": "1",
+            "KLEINANZEIGEN_MCP_HEALTH_TIMEOUT_SECONDS": "0.2",
+            "KLEINANZEIGEN_MCP_RUNTIME_DIR": str(runtime_dir),
+            "KLEINANZEIGEN_MCP_STARTUP_TIMEOUT_SECONDS": "60",
+            "KLEINANZEIGEN_OUTBOUND_RETRY_BUDGET": "0",
+            "PYTHONUNBUFFERED": "1",
+        }
+    )
+    processes: list[asyncio.subprocess.Process] = []
+    owned_backend_pids: set[int] = set()
+
+    try:
+        for _ in range(2):
+            process = await asyncio.create_subprocess_exec(
+                str(entrypoint),
+                cwd=tmp_path,
+                env=environment,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            processes.append(process)
+
+        await asyncio.gather(
+            *(
+                _initialize_stdio_process(process, request_id=index)
+                for index, process in enumerate(processes, start=1)
+            )
+        )
+        assert not state_path.exists(), "initialize must not start the backend"
+
+        await asyncio.gather(
+            *(
+                _call_missing_job(process, request_id=10 + index)
+                for index, process in enumerate(processes)
+            )
+        )
+        first_state = await _read_runtime_state(state_path)
+        first_pid = int(first_state["pid"])
+        owned_backend_pids.add(first_pid)
+        assert _pid_is_running(first_pid)
+
+        await _close_stdio_process(processes[0])
+        assert _pid_is_running(first_pid), "backend must survive MCP adapter EOF"
+
+        await _stop_owned_backend(first_pid)
+        await _call_missing_job(processes[1], request_id=20)
+        second_state = await _read_runtime_state(
+            state_path,
+            excluded_pid=first_pid,
+        )
+        second_pid = int(second_state["pid"])
+        owned_backend_pids.add(second_pid)
+        assert second_pid != first_pid
+        assert _pid_is_running(second_pid)
+
+        await _close_stdio_process(processes[1])
+        assert _pid_is_running(second_pid), "restarted backend must also survive EOF"
+    finally:
+        for process in processes:
+            if process.returncode is None:
+                process.terminate()
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(process.wait(), timeout=3.0)
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+        for pid in owned_backend_pids:
+            await _stop_owned_backend(pid)
 
 
 class _ConnectedBrowser:

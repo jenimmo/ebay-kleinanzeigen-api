@@ -86,15 +86,36 @@ async def test_server_exposes_exactly_the_eight_public_tools(mcp_server: Any) ->
     async with Client(mcp_server, raise_exceptions=True) as client:
         tools = (await client.list_tools()).tools
         instructions = client.instructions
+        server_info = client.server_info
 
     assert {tool.name for tool in tools} == EXPECTED_TOOLS
     assert len(tools) == 8
+    assert server_info.name == "kleinanzeigen"
+    assert server_info.title == "Kleinanzeigen Agent"
+    assert server_info.description is not None
+    assert "Kleinanzeigen.de" in server_info.description
     assert all(tool.description for tool in tools)
+    assert all(tool.title for tool in tools)
     assert all(tool.input_schema.get("type") == "object" for tool in tools)
     assert all(tool.output_schema is not None for tool in tools)
     assert instructions == SERVER_INSTRUCTIONS
+    assert "parallelen Suchjobs" in instructions
+    assert "next_action" in instructions
 
     by_name = {tool.name: tool for tool in tools}
+    for tool in tools:
+        for parameter_name, parameter_schema in tool.input_schema.get(
+            "properties", {}
+        ).items():
+            assert parameter_schema.get("description"), (
+                f"missing description for {tool.name}.{parameter_name}"
+            )
+
+    assert "continuation.required=true" in by_name["continue_search"].description
+    assert "paralleler Suchjobs" in by_name["merge_search_results"].description
+    assert "timed_out=true" in by_name["get_job_results"].description
+    assert "state=needs_attention" in by_name["resume_job"].description
+
     detail_ids = by_name["get_listing_details"].input_schema["properties"][
         "listing_ids"
     ]

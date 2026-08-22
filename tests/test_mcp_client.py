@@ -242,6 +242,139 @@ async def test_transport_failure_is_wrapped_without_leaking_request_secrets() ->
 
 
 @pytest.mark.asyncio
+async def test_lazy_base_url_provider_recovers_once_after_connection_failure() -> None:
+    provider_calls: list[bool] = []
+    requests: list[str] = []
+
+    def provider(refresh: bool) -> str:
+        provider_calls.append(refresh)
+        return "http://127.0.0.1:41002" if refresh else "http://127.0.0.1:41001"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.port == 41001:
+            raise httpx.ConnectError("backend exited", request=request)
+        return httpx.Response(200, json=_status(), request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = KleinanzeigenJobClient(
+            client=http,
+            base_url_provider=provider,
+        )
+        assert provider_calls == []
+        status = await client.get_job(JOB_ID)
+
+    assert status.job_id == JOB_ID
+    assert provider_calls == [False, True]
+    assert requests == [
+        f"http://127.0.0.1:41001/jobs/{JOB_ID}",
+        f"http://127.0.0.1:41002/jobs/{JOB_ID}",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lazy_provider_retries_transport_only_once() -> None:
+    provider_calls: list[bool] = []
+    request_count = 0
+
+    def provider(refresh: bool) -> str:
+        provider_calls.append(refresh)
+        return "http://127.0.0.1:41001"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        raise httpx.ConnectError("still unavailable", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = KleinanzeigenJobClient(client=http, base_url_provider=provider)
+        with pytest.raises(KleinanzeigenTransportError) as raised:
+            await client.get_job(JOB_ID)
+
+    assert raised.value.code == "transport_error"
+    assert provider_calls == [False, True]
+    assert request_count == 2
+
+
+@pytest.mark.asyncio
+async def test_lazy_provider_does_not_retry_an_api_response() -> None:
+    provider_calls: list[bool] = []
+
+    def provider(refresh: bool) -> str:
+        provider_calls.append(refresh)
+        return "http://127.0.0.1:41001"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            503,
+            json={"detail": {"error": "service_unavailable"}},
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = KleinanzeigenJobClient(client=http, base_url_provider=provider)
+        with pytest.raises(KleinanzeigenAPIError):
+            await client.get_job(JOB_ID)
+
+    assert provider_calls == [False]
+
+
+@pytest.mark.asyncio
+async def test_job_creation_without_idempotency_key_is_not_retried() -> None:
+    provider_calls: list[bool] = []
+    request_count = 0
+
+    def provider(refresh: bool) -> str:
+        provider_calls.append(refresh)
+        return "http://127.0.0.1:41001"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        raise httpx.ReadTimeout("outcome unknown", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = KleinanzeigenJobClient(client=http, base_url_provider=provider)
+        with pytest.raises(KleinanzeigenTransportError):
+            await client.create_search_job({"query": "Fahrrad"})
+
+    assert provider_calls == [False, True]
+    assert request_count == 1
+
+
+@pytest.mark.asyncio
+async def test_lazy_provider_retries_idempotent_job_creation_once() -> None:
+    provider_calls: list[bool] = []
+    request_count = 0
+
+    def provider(refresh: bool) -> str:
+        provider_calls.append(refresh)
+        return "http://127.0.0.1:41002" if refresh else "http://127.0.0.1:41001"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        if request.url.port == 41001:
+            raise httpx.ReadTimeout("outcome unknown", request=request)
+        return httpx.Response(
+            202,
+            json=_accepted(),
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = KleinanzeigenJobClient(client=http, base_url_provider=provider)
+        accepted = await client.create_search_job(
+            {"query": "Fahrrad"},
+            idempotency_key="autostart-retry-safe",
+        )
+
+    assert accepted.job_id == JOB_ID
+    assert provider_calls == [False, True]
+    assert request_count == 2
+
+
+@pytest.mark.asyncio
 async def test_backend_error_redacts_urls_headers_and_stacktraces() -> None:
     messages = [
         "backend http://10.0.0.4:9000/jobs failed Authorization: Bearer secret-token",
