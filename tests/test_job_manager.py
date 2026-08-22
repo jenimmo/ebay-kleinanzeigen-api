@@ -143,6 +143,103 @@ async def test_parallel_searches_and_109_details_are_lossless_and_fair(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_search_rejects_implausible_later_page_metadata_before_persisting_it(
+    tmp_path,
+):
+    async def search(task):
+        if task.page_number == 1:
+            return SearchPageResult(
+                [
+                    {"adid": str(3_090_000_000 + index), "title": "relevant"}
+                    for index in range(25)
+                ],
+                total_results=214,
+                total_pages=9,
+                page_size=25,
+                has_next_page=True,
+            )
+        return SearchPageResult(
+            [
+                {"adid": str(3_190_000_000 + index), "title": "foreign"}
+                for index in range(27)
+            ],
+            total_results=56_600_858,
+            page_size=27,
+            has_next_page=True,
+        )
+
+    async def detail(_task):
+        raise AssertionError
+
+    manager = JobManager(
+        settings(tmp_path / "jobs.sqlite3"),
+        search_executor=search,
+        detail_executor=detail,
+    )
+    await manager.start()
+    try:
+        job = await manager.create_search_job({"query": "metadata-guard"})
+        status = await wait_for_state(manager, job["job_id"], "needs_attention")
+        results = await manager.get_results(job["job_id"], limit=200)
+
+        assert status["results"] == {
+            "discovered": 25,
+            "available": 25,
+            "reported_total": 214,
+            "reported_pages": 9,
+        }
+        assert status["errors"]["last"]["code"] == "search_pagination_mismatch"
+        assert len(results["items"]) == 25
+        assert {item["data"]["title"] for item in results["items"]} == {"relevant"}
+    finally:
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_search_freezes_compatible_page_one_metadata_and_page_bound(tmp_path):
+    calls: list[int] = []
+
+    async def search(task):
+        calls.append(task.page_number)
+        start = (task.page_number - 1) * 25
+        return SearchPageResult(
+            [
+                {"adid": str(3_290_000_000 + index)}
+                for index in range(start, start + 25)
+            ],
+            total_results=50 if task.page_number == 1 else 55,
+            total_pages=2 if task.page_number == 1 else 999,
+            page_size=25,
+            has_next_page=True,
+        )
+
+    async def detail(_task):
+        raise AssertionError
+
+    manager = JobManager(
+        settings(tmp_path / "jobs.sqlite3"),
+        search_executor=search,
+        detail_executor=detail,
+    )
+    await manager.start()
+    try:
+        job = await manager.create_search_job({"query": "stable-metadata"})
+        status = await wait_for_state(manager, job["job_id"], "completed")
+        results = await manager.get_results(job["job_id"], limit=200)
+
+        assert calls == [1, 2]
+        assert status["results"] == {
+            "discovered": 50,
+            "available": 50,
+            "reported_total": 50,
+            "reported_pages": 2,
+        }
+        assert len(results["items"]) == 50
+    finally:
+        await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_search_pauses_at_200_and_releases_overhang_only_after_continue(tmp_path):
     async def search(_task):
         return SearchPageResult(
@@ -180,7 +277,9 @@ async def test_search_pauses_at_200_and_releases_overhang_only_after_continue(tm
 
         continuation_token = status["continuation"]["token"]
         continued = await manager.continue_job(
-            job["job_id"], continuation_token=continuation_token
+            job["job_id"],
+            continuation_token=continuation_token,
+            after_cursor=first["next_cursor"],
         )
         assert continued["state"] == "completed"
         final_page = await manager.get_results(
@@ -189,10 +288,124 @@ async def test_search_pauses_at_200_and_releases_overhang_only_after_continue(tm
         assert len(final_page["items"]) == 1
         assert final_page["items"][0]["sequence"] == 201
         replay = await manager.continue_job(
-            job["job_id"], continuation_token=continuation_token
+            job["job_id"],
+            continuation_token=continuation_token,
+            after_cursor=first["next_cursor"],
         )
         assert replay["idempotent_replay"] is True
         assert replay["state"] == "completed"
+    finally:
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_continue_cursor_is_bound_to_token_tranche_without_error_side_effects(
+    tmp_path,
+):
+    async def search(_task):
+        return SearchPageResult(
+            [{"adid": str(3_310_000_000 + index)} for index in range(500)],
+            total_results=500,
+            total_pages=1,
+            page_size=500,
+        )
+
+    async def detail(_task):
+        raise AssertionError
+
+    manager = JobManager(
+        settings(tmp_path / "jobs.sqlite3"),
+        search_executor=search,
+        detail_executor=detail,
+    )
+    await manager.start()
+    try:
+        job = await manager.create_search_job({"query": "cursor-bound"})
+        status = await wait_for_state(manager, job["job_id"], "awaiting_continuation")
+        first_token = status["continuation"]["token"]
+        first_page = await manager.get_results(job["job_id"], limit=200)
+        boundary_200 = first_page["next_cursor"]
+        assert boundary_200 is not None
+
+        invalid_first_boundaries = [
+            manager._encode_cursor("foreign-job", 200, version=1),
+            manager._encode_cursor(job["job_id"], 199, version=1),
+            manager._encode_cursor(job["job_id"], 201, version=1),
+        ]
+        before = await manager.get_job(job["job_id"])
+        for invalid_cursor in invalid_first_boundaries:
+            with pytest.raises(InvalidCursorError):
+                await manager.continue_job(
+                    job["job_id"],
+                    continuation_token=first_token,
+                    after_cursor=invalid_cursor,
+                )
+            unchanged = await manager.get_job(job["job_id"])
+            assert unchanged["state"] == before["state"]
+            assert unchanged["results"] == before["results"]
+            assert unchanged["continuation"] == before["continuation"]
+
+        first_ack = await manager.continue_job(
+            job["job_id"],
+            continuation_token=first_token,
+            after_cursor=boundary_200,
+        )
+        assert first_ack["continuation"]["approved_limit"] == 400
+
+        second_page = await manager.get_results(
+            job["job_id"], cursor=boundary_200, limit=200
+        )
+        boundary_400 = second_page["next_cursor"]
+        assert boundary_400 is not None
+        second_status = await manager.get_job(job["job_id"])
+        second_token = second_status["continuation"]["token"]
+
+        # The first token's receipt remains anchored at 200, while the new
+        # token is anchored at 400. Neither mismatch may release more results.
+        with pytest.raises(InvalidCursorError):
+            await manager.continue_job(
+                job["job_id"],
+                continuation_token=first_token,
+                after_cursor=boundary_400,
+            )
+        with pytest.raises(InvalidCursorError):
+            await manager.continue_job(
+                job["job_id"],
+                continuation_token=second_token,
+                after_cursor=boundary_200,
+            )
+        still_at_400 = await manager.get_job(job["job_id"])
+        assert still_at_400["results"]["available"] == 400
+        assert still_at_400["continuation"]["revision"] == 1
+
+        replay = await manager.continue_job(
+            job["job_id"],
+            continuation_token=first_token,
+            after_cursor=boundary_200,
+        )
+        assert replay["idempotent_replay"] is True
+        assert replay["continuation"]["approved_limit"] == 400
+
+        final_ack = await manager.continue_job(
+            job["job_id"],
+            continuation_token=second_token,
+            after_cursor=boundary_400,
+        )
+        assert final_ack["state"] == "completed"
+        final_status = await manager.get_job(job["job_id"])
+        assert final_status["results"]["available"] == 500
+        assert final_status["continuation"]["revision"] == 2
+
+        old_replay_after_later_continue = await manager.continue_job(
+            job["job_id"],
+            continuation_token=first_token,
+            after_cursor=boundary_200,
+        )
+        assert old_replay_after_later_continue["idempotent_replay"] is True
+        assert old_replay_after_later_continue["continuation"]["approved_limit"] == 400
+        unchanged_final = await manager.get_job(job["job_id"])
+        assert unchanged_final["results"]["available"] == 500
+        assert unchanged_final["continuation"]["revision"] == 2
     finally:
         await manager.close()
 
@@ -223,6 +436,9 @@ async def test_continuation_token_retry_never_releases_two_tranches(
         status = await wait_for_state(manager, job["job_id"], "awaiting_continuation")
         first_token = status["continuation"]["token"]
         assert status["results"]["available"] == 200
+        first_page = await manager.get_results(job["job_id"], limit=200)
+        boundary_200 = first_page["next_cursor"]
+        assert boundary_200 is not None
 
         original_get_job = manager.get_job
         original_finish = manager._finish_db_operation
@@ -249,12 +465,18 @@ async def test_continuation_token_retry_never_releases_two_tranches(
         # Cancellation is delivered only after COMMIT completed, modelling an
         # HTTP disconnect in the otherwise ambiguous durable-ACK window.
         with pytest.raises(asyncio.CancelledError):
-            await manager.continue_job(job["job_id"], continuation_token=first_token)
+            await manager.continue_job(
+                job["job_id"],
+                continuation_token=first_token,
+                after_cursor=boundary_200,
+            )
 
         # Retrying the exact token acknowledges the committed tranche without
         # accidentally releasing results 401-500.
         retry_ack = await manager.continue_job(
-            job["job_id"], continuation_token=first_token
+            job["job_id"],
+            continuation_token=first_token,
+            after_cursor=boundary_200,
         )
 
         assert retry_ack["idempotent_replay"] is True
@@ -262,17 +484,28 @@ async def test_continuation_token_retry_never_releases_two_tranches(
         assert retry_ack["continuation"]["revision"] == 1
 
         second_token = retry_ack["continuation"]["token"]
+        second_page = await manager.get_results(
+            job["job_id"], cursor=boundary_200, limit=200
+        )
+        boundary_400 = second_page["next_cursor"]
+        assert boundary_400 is not None
         second_ack = await manager.continue_job(
-            job["job_id"], continuation_token=second_token
+            job["job_id"],
+            continuation_token=second_token,
+            after_cursor=boundary_400,
         )
         second_retry = await manager.continue_job(
-            job["job_id"], continuation_token=second_token
+            job["job_id"],
+            continuation_token=second_token,
+            after_cursor=boundary_400,
         )
         assert second_ack["state"] == "completed"
         assert second_retry["idempotent_replay"] is True
 
         old_replay = await manager.continue_job(
-            job["job_id"], continuation_token=first_token
+            job["job_id"],
+            continuation_token=first_token,
+            after_cursor=boundary_200,
         )
         assert old_replay["idempotent_replay"] is True
         assert old_replay["continuation"]["approved_limit"] == 400

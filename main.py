@@ -4,6 +4,12 @@ from dataclasses import replace
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from kleinanzeigen_mcp.server import (
+    asgi_client_factory,
+    create_mcp_server,
+    create_streamable_http_app,
+)
+from starlette.routing import Route
 from routers import (
     inserate_ultra as inserate,
     inserat,
@@ -149,7 +155,11 @@ async def lifespan(app: FastAPI):
         app.state.browser_manager = browser_manager
         app.state.job_manager = job_manager
         app.state.uvloop_enabled = uvloop_enabled
-        yield
+        # An MCP ASGI app delegated through an exact Route does not receive its
+        # own lifespan. Start its stateful session manager after the shared
+        # browser and durable scheduler, and stop it before their teardown.
+        async with mcp_http_server.session_manager.run():
+            yield
     finally:
         # Stop durable workers before tearing down their shared browser state.
         try:
@@ -183,6 +193,7 @@ ACTIVE_ENDPOINTS = [
     "/jobs/{job_id}/results",
     "/jobs/{job_id}/continue",
     "/jobs/{job_id}/resume",
+    "/mcp",
     "/inserate",
     "/inserat/{id}",
     "/inserate-detailed",
@@ -316,3 +327,10 @@ app.include_router(inserate_batch.router)
 app.include_router(convert_url.router)
 app.include_router(inserate_by_url.router)
 app.include_router(jobs.router)
+
+# Keep MCP as a thin in-process client of the canonical REST job contract. An
+# exact ASGI Route delegates all HTTP methods without a catch-all mount, so the
+# parent router retains its normal redirect and 404 behavior everywhere else.
+mcp_http_server = create_mcp_server(asgi_client_factory(app))
+mcp_http_app = create_streamable_http_app(mcp_http_server)
+app.router.routes.append(Route("/mcp", endpoint=mcp_http_app, include_in_schema=False))

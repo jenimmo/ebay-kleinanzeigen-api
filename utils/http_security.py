@@ -1,9 +1,10 @@
 """Small ASGI security guards shared by all HTTP endpoints."""
 
 from collections.abc import Awaitable, Callable
+from ipaddress import ip_address
 from typing import Any
 
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 
 
 ASGIMessage = dict[str, Any]
@@ -78,3 +79,33 @@ class RequestBodyLimitMiddleware:
             content={"detail": "Request body too large"},
         )
         await response(scope, receive, send)
+
+
+class LoopbackOnlyMiddleware:
+    """Reject network peers outside the local host for unauthenticated routes."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Receive, send: Send):
+        if scope["type"] == "http" and not self._is_loopback(scope.get("client")):
+            response = PlainTextResponse(
+                "MCP endpoint is available only from loopback",
+                status_code=403,
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    def _is_loopback(client: object) -> bool:
+        if not isinstance(client, (tuple, list)) or not client:
+            return False
+        try:
+            address = ip_address(str(client[0]))
+        except ValueError:
+            return False
+        if address.is_loopback:
+            return True
+        mapped = getattr(address, "ipv4_mapped", None)
+        return bool(mapped is not None and mapped.is_loopback)

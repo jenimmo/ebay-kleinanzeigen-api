@@ -9,6 +9,83 @@ from utils.user_agent import get_random_ua
 logger = logging.getLogger(__name__)
 
 
+def _consume_future_exception(future: asyncio.Future) -> None:
+    """Mark an SDK future's exception as observed without changing awaiters."""
+
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except (asyncio.CancelledError, Exception):
+        # ``Future.exception()`` is only used to prevent asyncio's
+        # "exception was never retrieved" diagnostic. Existing awaiters still
+        # receive the original result or exception.
+        pass
+
+
+def _observe_playwright_shutdown_futures(playwright) -> None:
+    """Observe Playwright 1.x transport futures before stopping its driver.
+
+    A process-group SIGINT can terminate Chromium or the Playwright driver just
+    before application shutdown. Playwright 1.54 may then complete both its
+    transport-error future and an in-flight protocol callback with exceptions,
+    while its internal ``FIRST_COMPLETED`` waiter retrieves only one of them.
+    Registering observers prevents the other exception from being reported as
+    an unrelated, unhandled asyncio future. This is deliberately defensive so
+    a future Playwright version without these private attributes remains safe.
+    """
+
+    connection = getattr(getattr(playwright, "_impl_obj", None), "_connection", None)
+    if connection is None:
+        return
+
+    transport = getattr(connection, "_transport", None)
+    transport_error = getattr(transport, "on_error_future", None)
+    futures = [transport_error]
+    callbacks = getattr(connection, "_callbacks", None)
+    if isinstance(callbacks, dict):
+        futures.extend(
+            getattr(callback, "future", None) for callback in callbacks.values()
+        )
+
+    for future in futures:
+        if not isinstance(future, asyncio.Future):
+            continue
+        if future.done():
+            _consume_future_exception(future)
+        else:
+            future.add_done_callback(_consume_future_exception)
+
+
+async def _close_playwright_runtime(*, playwright, browser, contexts=()) -> None:
+    """Close one owned runtime without sending commands to a dying driver."""
+
+    if playwright is not None:
+        # Stopping the owning Playwright runtime closes every launched browser,
+        # context, and page. In contrast, calling Browser.close() first creates
+        # a new protocol callback which races a process-group SIGINT.
+        _observe_playwright_shutdown_futures(playwright)
+        try:
+            await playwright.stop()
+        except Exception:
+            logger.warning("Playwright driver was already unavailable during shutdown")
+        return
+
+    # This fallback covers partial initialization and the lightweight fake
+    # objects used by callers/tests where no owning Playwright runtime exists.
+    for context in contexts:
+        try:
+            await context.close()
+        except Exception:
+            logger.warning("Browser context was already unavailable during shutdown")
+
+    if browser is not None:
+        try:
+            await browser.close()
+        except Exception:
+            logger.warning("Browser was already unavailable during shutdown")
+
+
 async def _finish_cleanup_task(
     cleanup_task: asyncio.Task[BaseException | None], *, suppress_errors: bool
 ) -> None:
@@ -99,6 +176,7 @@ class PlaywrightManager:
     def __init__(self):
         self._playwright = None
         self._browser = None
+        self._shutdown_lock = asyncio.Lock()
 
     async def start(self):
         self._playwright = await async_playwright().start()
@@ -125,21 +203,20 @@ class PlaywrightManager:
                 await context.close()
 
     async def close(self):
-        try:
-            if self._browser:
-                await self._browser.close()
-        except Exception:
-            logger.warning("Browser was already unavailable during shutdown")
-        finally:
-            self._browser = None
-
-        try:
-            if self._playwright:
-                await self._playwright.stop()
-        except Exception:
-            logger.warning("Playwright driver was already unavailable during shutdown")
-        finally:
+        async with self._shutdown_lock:
+            playwright = self._playwright
+            browser = self._browser
             self._playwright = None
+            self._browser = None
+            await _finish_cleanup_task(
+                asyncio.create_task(
+                    _close_playwright_runtime(
+                        playwright=playwright,
+                        browser=browser,
+                    )
+                ),
+                suppress_errors=True,
+            )
 
 
 class OptimizedPlaywrightManager:
@@ -166,6 +243,7 @@ class OptimizedPlaywrightManager:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._context_slots = asyncio.BoundedSemaphore(max_contexts)
         self._context_lock = asyncio.Lock()
+        self._shutdown_lock = asyncio.Lock()
 
         # Performance metrics
         self._contexts_created = 0
@@ -407,33 +485,24 @@ class OptimizedPlaywrightManager:
 
     async def close(self):
         """Clean up all resources without failing app shutdown on a dead driver."""
-        contexts = []
-        for context in [*self._context_pool, *self._context_in_use]:
-            if not any(existing is context for existing in contexts):
-                contexts.append(context)
-        self._context_pool.clear()
-        self._context_in_use.clear()
-
-        for context in contexts:
-            try:
-                await context.close()
-            except Exception:
-                logger.warning(
-                    "Browser context was already unavailable during shutdown"
-                )
-
-        try:
-            if self._browser:
-                await self._browser.close()
-        except Exception:
-            logger.warning("Browser was already unavailable during shutdown")
-        finally:
-            self._browser = None
-
-        try:
-            if self._playwright:
-                await self._playwright.stop()
-        except Exception:
-            logger.warning("Playwright driver was already unavailable during shutdown")
-        finally:
+        async with self._shutdown_lock:
+            playwright = self._playwright
+            browser = self._browser
+            contexts = []
+            for context in [*self._context_pool, *self._context_in_use]:
+                if not any(existing is context for existing in contexts):
+                    contexts.append(context)
+            self._context_pool.clear()
+            self._context_in_use.clear()
             self._playwright = None
+            self._browser = None
+            await _finish_cleanup_task(
+                asyncio.create_task(
+                    _close_playwright_runtime(
+                        playwright=playwright,
+                        browser=browser,
+                        contexts=contexts,
+                    )
+                ),
+                suppress_errors=True,
+            )

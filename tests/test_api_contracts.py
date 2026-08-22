@@ -18,6 +18,7 @@ EXPECTED_ENDPOINTS = {
     "/jobs/{job_id}/results",
     "/jobs/{job_id}/continue",
     "/jobs/{job_id}/resume",
+    "/mcp",
     "/inserate",
     "/inserat/{id}",
     "/inserate-detailed",
@@ -164,7 +165,7 @@ def test_main_app_mounts_the_expected_api_methods_once():
         (route.path, method)
         for route in main.app.routes
         if hasattr(route, "methods")
-        for method in route.methods
+        for method in (route.methods or ())
         if method in {"GET", "POST", "DELETE"}
     }
 

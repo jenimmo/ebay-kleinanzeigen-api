@@ -163,7 +163,7 @@ def live_search_snapshot(live_http_client: httpx.Client) -> dict[str, Any]:
     """Submit exactly one narrow live search and reuse its persisted snapshot."""
 
     run_day = datetime.now(timezone.utc).date().isoformat()
-    idempotency_key = f"live-suite-search-v2-{run_day}"
+    idempotency_key = f"live-suite-search-v3-{run_day}"
     response = live_http_client.post(
         "/inserate-by-url",
         headers={"Idempotency-Key": idempotency_key},
@@ -203,7 +203,7 @@ def live_detail_snapshot(
     search_item = live_search_snapshot["results"][0]
     listing_id = str(search_item["listing_id"])
     run_day = datetime.now(timezone.utc).date().isoformat()
-    idempotency_key = f"live-suite-detail-v2-{run_day}-{listing_id}"
+    idempotency_key = f"live-suite-detail-v3-{run_day}-{listing_id}"
     response = live_http_client.get(
         f"/inserat/{listing_id}",
         headers={"Idempotency-Key": idempotency_key},

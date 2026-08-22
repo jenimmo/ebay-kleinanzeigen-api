@@ -105,9 +105,10 @@ class FakeJobManager:
         job_id: str,
         *,
         continuation_token: str,
+        after_cursor: str | None = None,
     ) -> dict[str, Any]:
         self._raise_if_configured()
-        self.calls.append(("continue_job", (job_id, continuation_token)))
+        self.calls.append(("continue_job", (job_id, continuation_token, after_cursor)))
         return self._accepted("search")
 
     async def resume_job(
@@ -246,7 +247,7 @@ def test_status_results_and_actions_delegate_without_browser_work(
     assert manager.calls == [
         ("get_job", JOB_ID),
         ("get_results", (JOB_ID, "opaque", 17)),
-        ("continue_job", (JOB_ID, "continue-token")),
+        ("continue_job", (JOB_ID, "continue-token", None)),
         ("resume_job", (JOB_ID, "resume-token")),
         ("cancel_job", JOB_ID),
     ]
@@ -260,6 +261,63 @@ def test_continue_requires_the_status_token(
 
     assert response.status_code == 422
     assert manager.calls == []
+
+
+def test_continue_forwards_optional_after_cursor(
+    client: TestClient,
+    manager: FakeJobManager,
+):
+    response = client.post(
+        f"/jobs/{JOB_ID}/continue",
+        json={
+            "continuation_token": "continue-token",
+            "after_cursor": "opaque-search-cursor",
+        },
+    )
+
+    assert response.status_code == 202
+    assert manager.calls == [
+        (
+            "continue_job",
+            (JOB_ID, "continue-token", "opaque-search-cursor"),
+        )
+    ]
+
+
+@pytest.mark.parametrize("after_cursor", ["", "x" * 513])
+def test_continue_rejects_invalid_after_cursor_before_manager_call(
+    client: TestClient,
+    manager: FakeJobManager,
+    after_cursor: str,
+):
+    response = client.post(
+        f"/jobs/{JOB_ID}/continue",
+        json={
+            "continuation_token": "continue-token",
+            "after_cursor": after_cursor,
+        },
+    )
+
+    assert response.status_code == 422
+    assert manager.calls == []
+
+
+def test_continue_maps_job_manager_cursor_mismatch_to_http_400(
+    client: TestClient,
+    manager: FakeJobManager,
+):
+    manager.error = InvalidCursorError("cursor boundary mismatch")
+
+    response = client.post(
+        f"/jobs/{JOB_ID}/continue",
+        json={
+            "continuation_token": "continue-token",
+            "after_cursor": "opaque-search-cursor",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "invalid_cursor"
 
 
 def test_resume_requires_the_status_token(

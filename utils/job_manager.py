@@ -939,14 +939,20 @@ class JobManager:
         job_id: str,
         *,
         continuation_token: str,
+        after_cursor: str | None = None,
     ) -> dict[str, Any]:
-        """Idempotently release the tranche authorized by a status token."""
+        """Idempotently release the tranche authorized by token and cursor."""
 
         self._require_started()
         normalized = self._normalize_job_id(job_id)
         requested_revision = self._decode_continuation_token(
             continuation_token,
             normalized,
+        )
+        after_sequence = (
+            self._decode_cursor(after_cursor, normalized, expected_version=1)
+            if after_cursor is not None
+            else None
         )
         now = self._clock()
         replay = False
@@ -969,17 +975,26 @@ class JobManager:
             )
             receipt = await receipt_cursor.fetchone()
             if receipt is not None:
+                receipt_approved_limit = int(receipt["approved_limit"])
+                self._validate_continuation_boundary(
+                    after_sequence,
+                    receipt_approved_limit - _SEARCH_CHUNK_SIZE,
+                )
                 # Receipts preserve the exact durable ACK across later
                 # continuations and process restarts.
                 replay = True
                 current_revision = int(receipt["result_revision"])
                 state = receipt["result_state"]
-                approved_limit = int(receipt["approved_limit"])
+                approved_limit = receipt_approved_limit
             elif requested_revision != current_revision:
                 raise JobConflictError("Continuation token is stale")
             else:
                 if state != "awaiting_continuation":
                     raise JobConflictError("Job is not awaiting continuation")
+                self._validate_continuation_boundary(
+                    after_sequence,
+                    approved_limit,
+                )
 
                 approved_limit += _SEARCH_CHUNK_SIZE
                 await db.execute(
@@ -2102,6 +2117,18 @@ class JobManager:
             raise InvalidCursorError("Invalid result cursor") from exc
 
     @staticmethod
+    def _validate_continuation_boundary(
+        after_sequence: int | None,
+        expected_sequence: int,
+    ) -> None:
+        """Require an optional search cursor to anchor the token's tranche."""
+
+        if after_sequence is not None and after_sequence != expected_sequence:
+            raise InvalidCursorError(
+                "Result cursor does not match the continuation boundary"
+            )
+
+    @staticmethod
     def _encode_continuation_token(job_id: str, revision: int) -> str:
         return JobManager._encode_action_token(job_id, "continue", revision)
 
@@ -2516,6 +2543,7 @@ class JobManager:
             if job["state"] == "cancelled":
                 await self._abandon_stale_probe_locked(db, claimed, now)
                 return
+
             cursor = await db.execute(
                 """
                 UPDATE work_items
@@ -2627,6 +2655,22 @@ class JobManager:
                 await self._abandon_stale_probe_locked(db, claimed, now)
                 return
 
+            page_number = int(claimed.page_number)
+            old_total = job["total_reported"]
+            old_pages = job["total_pages"]
+            if (
+                page_number > 1
+                and old_total is not None
+                and result.total_results is not None
+            ):
+                expected_total = int(old_total)
+                tolerance = max(25, math.ceil(expected_total * 0.1))
+                if abs(result.total_results - expected_total) > tolerance:
+                    raise PermanentJobError(
+                        "Search result metadata changed implausibly between pages",
+                        error_code="search_pagination_mismatch",
+                    )
+
             existing_cursor = await db.execute(
                 "SELECT listing_id FROM results WHERE job_id = ?",
                 (claimed.job_id,),
@@ -2691,23 +2735,17 @@ class JobManager:
                 (claimed.job_id,),
             )
             released = int((await released_cursor.fetchone())[0])
-            old_total = job["total_reported"]
-            reported_total = (
-                max(int(old_total or 0), result.total_results)
-                if result.total_results is not None
-                else old_total
-            )
-            old_pages = job["total_pages"]
-            total_pages = (
-                max(int(old_pages or 0), result.total_pages)
-                if result.total_pages is not None
-                else old_pages
-            )
-            page_number = int(claimed.page_number)
-            if result.has_next_page is not None:
-                has_more = result.has_next_page
-            elif total_pages is not None:
+            # Page one defines the immutable search snapshot metadata. Counts
+            # naturally fluctuate while later pages are fetched, so compatible
+            # later values are tolerated but never replace the first-page view.
+            reported_total = result.total_results if page_number == 1 else old_total
+            total_pages = result.total_pages if page_number == 1 else old_pages
+            if total_pages is not None:
                 has_more = page_number < int(total_pages)
+                if result.has_next_page is False:
+                    has_more = False
+            elif result.has_next_page is not None:
+                has_more = result.has_next_page
             elif reported_total is not None:
                 has_more = discovered < int(reported_total)
             elif result.page_size is not None:

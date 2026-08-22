@@ -185,9 +185,216 @@ and one container, and mount `/app/data` when using Docker:
 docker run -p 8000:8000 -v kleinanzeigen-jobs:/app/data ebay-kleinanzeigen-api
 ```
 
-All agents, including a future MCP server, must call this shared API process and
+All agents, including the MCP server, must call this shared API process and
 must not start their own browser manager. Horizontal scaling requires a later
 Redis-backed distributed queue, rate limiter, and circuit state.
+
+### Local MCP server
+
+The local MCP integration is another interface to the same durable job API. It
+must not create a second browser, scheduler, or SQLite owner. Start exactly one
+FastAPI process first; Codex, Claude Code, Claude Desktop, and their subagents
+then share its browser pool, outbound limits, jobs, and persisted results.
+
+#### Start the shared API manually
+
+For MCP use, bind only to loopback, run exactly one Uvicorn worker, and do not
+use `--reload`:
+
+```sh
+cd "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API"
+uv sync --no-editable
+uv run --no-editable playwright install chromium
+uv run --no-editable uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+Keep that process running independently of the MCP client and verify readiness:
+
+```sh
+curl -fsS http://127.0.0.1:8000/health
+```
+
+The standard MCP transport is Streamable HTTP at
+`http://127.0.0.1:8000/mcp`. In addition to the SDK's Host-header protection,
+the MCP route rejects non-loopback network peers even if the surrounding API
+was accidentally bound more broadly. The optional STDIO transport is started
+with:
+
+```sh
+uv run --no-editable --directory "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API" kleinanzeigen-mcp
+```
+
+After `uv sync --no-editable`, clients may instead launch the absolute executable
+`/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp`.
+The STDIO process is only an adapter to the already running API; stopping a
+client must not stop FastAPI or its accepted jobs. It uses
+`KLEINANZEIGEN_API_BASE_URL` when set and otherwise connects to
+`http://127.0.0.1:8000`.
+
+Configure either HTTP or STDIO under the MCP name `kleinanzeigen`, not both at
+the same time. Both expose the identical eight-tool catalog and use the same
+FastAPI job scheduler.
+
+#### MCP tools
+
+The server exposes eight tools:
+
+| Tool | Purpose |
+|---|---|
+| `search_listings` | Create a durable search job from structured filters or one validated Kleinanzeigen search URL. |
+| `continue_search` | Submit the current continuation token and release/schedule the next tranche of at most 200 unique search results. |
+| `merge_search_results` | Merge persisted results from ordered, unique search job IDs without browser access. The first source wins duplicates; output includes `source_job_ids`, stable snapshot pagination, and source states. |
+| `get_listing_details` | Create a durable detail job from an explicit list of selected listing IDs. |
+| `get_job_status` | Read progress, continuation/resume data, cooldown, and errors without contacting Kleinanzeigen. |
+| `get_job_results` | Read cursor-paginated persisted results without contacting Kleinanzeigen. |
+| `resume_job` | Retry exactly the current persisted `needs_attention` cycle with its resume token. |
+| `cancel_job` | Durably cancel accepted work and drain any currently running browser operation. |
+
+Search jobs release at most 200 unique listings per tranche. When a job reaches
+`awaiting_continuation`, pass the unchanged token and the exact `next_cursor`
+from the preceding tranche to `continue_search`. Token and cursor are bound to
+that tranche; retrying the same pair is idempotent and cannot release another
+tranche.
+
+Detail jobs have no application-level item-count limit. Explicit
+`listing_ids` are normalized and deduplicated, but every HTTP request is still
+subject to the global 64 KiB request-body limit. A payload larger than 65,536
+bytes returns `413`; split a very large ID list into self-selected batches.
+
+`merge_search_results` accepts up to 32 ordered, unique `search_job_ids`, an
+optional snapshot cursor, and `limit` from 1 through 200 (default 200). A single
+snapshot may contain at most 10,000 visible source items, which bounds local
+memory and CPU work; split unusually large merges into smaller groups. The tool
+preserves source order followed by each result's sequence, deduplicates by
+envelope `listing_id`, and returns `has_more`, `next_cursor`, watermarks, and
+source states. It never starts browser work.
+
+#### Codex
+
+Add the standard HTTP server from the CLI:
+
+```sh
+codex mcp add kleinanzeigen --url http://127.0.0.1:8000/mcp
+codex mcp list
+```
+
+For explicit project or user configuration, add this to `.codex/config.toml`
+or `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.kleinanzeigen]
+url = "http://127.0.0.1:8000/mcp"
+tool_timeout_sec = 900
+```
+
+Codex stores timeout values in seconds. In the Codex TUI, use `/mcp` to inspect
+the connection and discovered tools.
+
+As a STDIO alternative, replace the URL entry above with:
+
+```toml
+[mcp_servers.kleinanzeigen]
+command = "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp"
+env = { KLEINANZEIGEN_API_BASE_URL = "http://127.0.0.1:8000" }
+tool_timeout_sec = 900
+```
+
+#### Claude Code
+
+Add the standard HTTP endpoint and set the tool timeout when starting Claude
+Code. `MCP_TOOL_TIMEOUT` is measured in milliseconds:
+
+```sh
+claude mcp add --transport http kleinanzeigen --scope local \
+  http://127.0.0.1:8000/mcp
+claude mcp list
+
+MCP_TOOL_TIMEOUT=900000 claude
+```
+
+Alternatively, export `MCP_TOOL_TIMEOUT=900000` in the shell environment that
+launches Claude Code. Use `/mcp` inside Claude Code to inspect the server.
+
+To use STDIO instead, remove the HTTP entry and add the installed adapter:
+
+```sh
+claude mcp remove kleinanzeigen
+claude mcp add --transport stdio kleinanzeigen -- \
+  "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp"
+```
+
+#### Claude Desktop (classic STDIO configuration)
+
+On macOS, add the following to
+`~/Library/Application Support/Claude/claude_desktop_config.json`, preserving
+any other configured servers, and restart Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "kleinanzeigen": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-editable",
+        "--directory",
+        "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API",
+        "kleinanzeigen-mcp"
+      ]
+    }
+  }
+}
+```
+
+If Claude Desktop cannot find `uv`, replace `command` with
+`/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp`
+and set `args` to `[]`. The shared FastAPI process must already be healthy.
+
+#### Large results and client limits
+
+Prefer cursor pagination over returning every result at once. The tools
+`search_listings`, `continue_search`, `merge_search_results`,
+`get_listing_details`, and `get_job_results` advertise
+`_meta["anthropic/maxResultSizeChars"] = 500000`, allowing Claude Code to handle
+text results up to the supported 500,000-character ceiling. Claude Code can also
+raise its general MCP output budget when needed:
+
+```sh
+MAX_MCP_OUTPUT_TOKENS=50000 MCP_TOOL_TIMEOUT=900000 claude
+```
+
+The metadata limit and `MAX_MCP_OUTPUT_TOKENS` are client output controls; they
+do not change the API's 200-item result-page limit or 64 KiB request-body limit.
+
+#### Tests and diagnosis
+
+Run the MCP-focused offline tests, then the complete offline suite:
+
+```sh
+./.venv/bin/pytest -q -p no:cacheprovider tests/test_mcp_*.py
+./.venv/bin/pytest -q -p no:cacheprovider
+```
+
+Useful checks:
+
+```sh
+curl -fsS http://127.0.0.1:8000/health
+codex mcp list
+claude mcp list
+```
+
+- Connection refused: start the single FastAPI process and recheck `/health`.
+- HTTP `503`: the browser or durable job manager is not ready; inspect the API
+  log and `GET /outbound-status`.
+- `Another scheduler already owns this job database`: stop the unintended
+  second Uvicorn process; do not add workers or use `--reload`.
+- HTTP `413`: the MCP/REST request exceeded 64 KiB; split explicit detail IDs.
+- Missing tools: confirm the exact `/mcp` URL, restart the client, and inspect
+  `codex mcp list`, `claude mcp list`, or `/mcp` in the client.
+- Tool timeout: verify `tool_timeout_sec = 900` for Codex or
+  `MCP_TOOL_TIMEOUT=900000` for Claude Code. Accepted durable jobs continue even
+  if an MCP client disconnects; reconnect and read their status/results.
 
 ### API Endpoints
 

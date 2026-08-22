@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -378,7 +379,7 @@ def test_simple_manager_closes_context_when_page_close_fails():
     run(scenario())
 
 
-def test_optimized_manager_shutdown_is_best_effort_for_dead_driver():
+def test_optimized_manager_shutdown_stops_owning_runtime_without_protocol_close():
     async def scenario():
         pooled = FakeContext(fail_close=True)
         checked_out = FakeContext()
@@ -392,13 +393,116 @@ def test_optimized_manager_shutdown_is_best_effort_for_dead_driver():
 
         await manager.close()
 
-        assert pooled.close_calls == 1
-        assert checked_out.close_calls == 1
-        assert browser.close_calls == 1
+        # Playwright.stop() owns browser/context teardown. Calling the protocol
+        # close methods here would race a driver already terminated by SIGINT.
+        assert pooled.close_calls == 0
+        assert checked_out.close_calls == 0
+        assert browser.close_calls == 0
         assert playwright.stop_calls == 1
         assert manager._context_pool == []
         assert manager._context_in_use == []
         assert manager._browser is None
         assert manager._playwright is None
+
+    run(scenario())
+
+
+def test_optimized_manager_shutdown_falls_back_without_playwright_owner():
+    async def scenario():
+        pooled = FakeContext(fail_close=True)
+        checked_out = FakeContext()
+        browser = FakeBrowser(fail_close=True)
+        manager = OptimizedPlaywrightManager(max_contexts=2, max_concurrent=1)
+        manager._context_pool = [pooled]
+        manager._context_in_use = [checked_out]
+        manager._browser = browser
+
+        await manager.close()
+
+        assert pooled.close_calls == 1
+        assert checked_out.close_calls == 1
+        assert browser.close_calls == 1
+        assert manager._context_pool == []
+        assert manager._context_in_use == []
+        assert manager._browser is None
+
+    run(scenario())
+
+
+def test_optimized_manager_shutdown_is_idempotent_under_concurrent_calls():
+    async def scenario():
+        stop_started = asyncio.Event()
+        finish_stop = asyncio.Event()
+
+        class BlockingPlaywright(FakePlaywright):
+            async def stop(self):
+                self.stop_calls += 1
+                stop_started.set()
+                await finish_stop.wait()
+
+        playwright = BlockingPlaywright()
+        manager = OptimizedPlaywrightManager(max_contexts=1, max_concurrent=1)
+        manager._browser = FakeBrowser()
+        manager._playwright = playwright
+
+        first = asyncio.create_task(manager.close())
+        await stop_started.wait()
+        second = asyncio.create_task(manager.close())
+        await asyncio.sleep(0)
+        assert not second.done()
+
+        finish_stop.set()
+        await asyncio.gather(first, second)
+
+        assert playwright.stop_calls == 1
+        assert manager._browser is None
+        assert manager._playwright is None
+
+    run(scenario())
+
+
+def test_shutdown_observes_transport_and_protocol_future_exceptions():
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        transport_error = loop.create_future()
+        protocol_error = loop.create_future()
+        transport_error.set_exception(
+            Exception("Connection closed while reading from the driver")
+        )
+
+        class DisconnectingPlaywright(FakePlaywright):
+            def __init__(self):
+                super().__init__()
+                self._impl_obj = SimpleNamespace(
+                    _connection=SimpleNamespace(
+                        _transport=SimpleNamespace(
+                            on_error_future=transport_error,
+                        ),
+                        _callbacks={
+                            1: SimpleNamespace(future=protocol_error),
+                        },
+                    )
+                )
+
+            async def stop(self):
+                self.stop_calls += 1
+                protocol_error.set_exception(
+                    RuntimeError("Target page, context or browser has been closed")
+                )
+
+        playwright = DisconnectingPlaywright()
+        manager = OptimizedPlaywrightManager(max_contexts=1, max_concurrent=1)
+        manager._browser = FakeBrowser(fail_close=True)
+        manager._playwright = playwright
+
+        await manager.close()
+        # Let callbacks registered on the pending protocol future run.
+        await asyncio.sleep(0)
+
+        assert playwright.stop_calls == 1
+        assert manager._browser is None
+        assert manager._playwright is None
+        assert not transport_error._log_traceback
+        assert not protocol_error._log_traceback
 
     run(scenario())

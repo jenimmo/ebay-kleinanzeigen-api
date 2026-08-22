@@ -123,6 +123,7 @@ class ContinueJobRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     continuation_token: str = Field(min_length=1, max_length=512)
+    after_cursor: str | None = Field(default=None, min_length=1, max_length=512)
 
 
 class ResumeJobRequest(BaseModel):
@@ -346,6 +347,7 @@ async def continue_job(
         record = await manager.continue_job(
             job_id,
             continuation_token=body.continuation_token,
+            after_cursor=body.after_cursor,
         )
     except JobManagerError as exc:
         raise_job_manager_error(exc)

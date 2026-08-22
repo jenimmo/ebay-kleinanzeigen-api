@@ -2,7 +2,7 @@ import pytest
 from fastapi import Body, FastAPI
 from fastapi.testclient import TestClient
 
-from utils.http_security import RequestBodyLimitMiddleware
+from utils.http_security import LoopbackOnlyMiddleware, RequestBodyLimitMiddleware
 
 
 def _test_app(limit: int = 32) -> FastAPI:
@@ -59,6 +59,20 @@ def test_streamed_body_over_limit_is_rejected_without_content_length():
 def test_body_limit_must_be_positive():
     with pytest.raises(ValueError, match="max_body_size must be at least 1"):
         RequestBodyLimitMiddleware(object(), max_body_size=0)
+
+
+@pytest.mark.parametrize(
+    ("client", "expected"),
+    [
+        (("127.0.0.1", 8000), True),
+        (("::1", 8000), True),
+        (("::ffff:127.0.0.1", 8000), True),
+        (("203.0.113.10", 8000), False),
+        (None, False),
+    ],
+)
+def test_loopback_guard_classifies_network_peers(client, expected):
+    assert LoopbackOnlyMiddleware._is_loopback(client) is expected
 
 
 def test_main_application_installs_the_global_body_limit():

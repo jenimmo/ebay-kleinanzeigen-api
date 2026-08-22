@@ -15,7 +15,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
-from urllib.parse import unquote, urlencode, urlparse, urlunparse
+from urllib.parse import urlencode, urlparse, urlunparse
 from typing import List, Dict, Any, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -52,6 +52,9 @@ from utils.asyncio_optimizations import (
 _KLEINANZEIGEN_TIMEZONE = ZoneInfo("Europe/Berlin")
 _logger = logging.getLogger(__name__)
 _BREADCRUMB_SELECTOR = ".breadcrump-summary"
+_PAGE_SEGMENT_PATTERN = re.compile(r"^(?:s-)?seite:\d+$")
+_CATEGORY_FILTER_PATTERN = re.compile(r"^(?:k\d+)?c\d+")
+_KEYWORD_FILTER_PATTERN = re.compile(r"^k\d+")
 
 
 class SearchExtractionError(RuntimeError):
@@ -93,7 +96,18 @@ def _parse_breadcrumb_summary(
 
 
 def _inject_search_page(url: str, page_number: int) -> str:
-    """Replace an existing search page segment without changing its filters."""
+    """Return the canonical Kleinanzeigen URL for one result page.
+
+    Kleinanzeigen uses two pagination forms. Category and filtered searches put
+    ``seite:N`` immediately before their terminal filter segment. The compact
+    all-category keyword route ``/s-<keyword>/k0`` instead expands to
+    ``/s-seite:N/<keyword>/k0``. Keeping those forms distinct is important:
+    appending ``s-seite:N`` after ``k0`` silently navigates to a different,
+    effectively unfiltered result set.
+
+    Existing page segments are replaced, making this operation idempotent. The
+    encoded path, query string and fragment are intentionally left untouched.
+    """
 
     if isinstance(page_number, bool) or not isinstance(page_number, int):
         raise ValueError("page_number must be an integer")
@@ -101,28 +115,55 @@ def _inject_search_page(url: str, page_number: int) -> str:
         raise ValueError("page_number must be at least 1")
 
     parsed = urlparse(url)
-    path = unquote(parsed.path)
+    raw_segments = [segment for segment in parsed.path.strip("/").split("/") if segment]
+    had_leading_keyword_page = bool(
+        raw_segments and re.fullmatch(r"s-seite:\d+", raw_segments[0])
+    )
     segments = [
         segment
-        for segment in path.strip("/").split("/")
-        if segment
-        and not re.fullmatch(r"s-seite:\d+", segment)
-        and not re.fullmatch(r"seite:\d+", segment)
+        for segment in raw_segments
+        if not _PAGE_SEGMENT_PATTERN.fullmatch(segment)
     ]
+
+    # ``/s-foo/k0`` is the compact first-page form of
+    # ``/s-seite:N/foo/k0``. Reconstructing the compact form for page 1 also
+    # makes replacement of an already paginated URL stable.
+    compact_keyword_route = (
+        len(segments) == 2
+        and segments[0].startswith("s-")
+        and _KEYWORD_FILTER_PATTERN.match(segments[1]) is not None
+        and _CATEGORY_FILTER_PATTERN.match(segments[1]) is None
+    )
+    expanded_keyword_route = (
+        had_leading_keyword_page
+        and len(segments) == 2
+        and not segments[0].startswith("s-")
+        and _KEYWORD_FILTER_PATTERN.match(segments[1]) is not None
+        and _CATEGORY_FILTER_PATTERN.match(segments[1]) is None
+    )
+
+    if compact_keyword_route or expanded_keyword_route:
+        keyword = segments[0][2:] if compact_keyword_route else segments[0]
+        if page_number == 1:
+            segments = [f"s-{keyword}", segments[1]]
+        else:
+            segments = [f"s-seite:{page_number}", keyword, segments[1]]
+        return urlunparse(parsed._replace(path="/" + "/".join(segments)))
+
     if page_number > 1:
         filter_index = next(
             (
                 index
                 for index, segment in enumerate(segments)
-                if re.match(r"^k?\d*c\d+", segment)
+                if _CATEGORY_FILTER_PATTERN.match(segment)
+                or _KEYWORD_FILTER_PATTERN.match(segment)
             ),
             None,
         )
-        page_segment = f"seite:{page_number}"
         if filter_index is None:
             segments.append(f"s-seite:{page_number}")
         else:
-            segments.insert(filter_index, page_segment)
+            segments.insert(filter_index, f"seite:{page_number}")
     return urlunparse(parsed._replace(path="/" + "/".join(segments)))
 
 

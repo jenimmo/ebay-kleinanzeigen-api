@@ -1,0 +1,76 @@
+"""Reusable MCP support layer for the Kleinanzeigen persistent job API."""
+
+from .client import (
+    KleinanzeigenAPIError,
+    KleinanzeigenClientError,
+    KleinanzeigenJobClient,
+    KleinanzeigenProtocolError,
+    KleinanzeigenTransportError,
+)
+from .merge import (
+    MAX_MERGED_RESULTS,
+    MergeError,
+    apply_detail_changes,
+    merge_detail_snapshot,
+    merge_search_results,
+)
+from .models import (
+    ACTIONABLE_JOB_STATES,
+    TERMINAL_JOB_STATES,
+    DetailResultSnapshot,
+    JobAccepted,
+    JobResultItem,
+    JobResultsPage,
+    JobState,
+    JobStatus,
+    JobType,
+    MergeSnapshotCursor,
+    SearchResultSnapshot,
+    WaitProgress,
+    WaitResult,
+)
+from .waiter import (
+    MAX_WAIT_SECONDS,
+    JobReadClient,
+    JobWaiter,
+    ProgressCallback,
+    collect_detail_changes,
+    collect_detail_snapshot,
+    collect_search_results,
+    wait_for_job,
+)
+
+
+__all__ = [
+    "ACTIONABLE_JOB_STATES",
+    "DetailResultSnapshot",
+    "JobAccepted",
+    "JobReadClient",
+    "JobResultItem",
+    "JobResultsPage",
+    "JobState",
+    "JobStatus",
+    "JobType",
+    "JobWaiter",
+    "KleinanzeigenAPIError",
+    "KleinanzeigenClientError",
+    "KleinanzeigenJobClient",
+    "KleinanzeigenProtocolError",
+    "KleinanzeigenTransportError",
+    "MAX_MERGED_RESULTS",
+    "MAX_WAIT_SECONDS",
+    "MergeError",
+    "MergeSnapshotCursor",
+    "ProgressCallback",
+    "SearchResultSnapshot",
+    "TERMINAL_JOB_STATES",
+    "WaitProgress",
+    "WaitResult",
+    "apply_detail_changes",
+    "collect_detail_changes",
+    "collect_detail_snapshot",
+    "collect_search_results",
+    "merge_detail_snapshot",
+    "merge_search_results",
+    "wait_for_job",
+]
