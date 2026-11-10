@@ -1,0 +1,12 @@
+{
+  "manifest_version": 2,
+  "name": "Kleinanzeigen Nachrichten",
+  "version": "1.0.23",
+  "description": "Verbindet ausdrücklich ausgewählte Kleinanzeigen-Tabs mit der lokalen Nachrichten-API.",
+  "icons": {"16": "icon-16.png", "32": "icon-32.png", "48": "icon-48.png", "128": "icon-128.png", "256": "icon-256.png"},
+  "permissions": ["nativeMessaging", "storage", "https://www.kleinanzeigen.de/*"],
+  "background": {"scripts": ["protocol.js", "background.js"], "persistent": true},
+  "browser_action": {"default_popup": "popup.html", "default_title": "Kleinanzeigen Nachrichten", "default_icon": {"16": "toolbar-16.png", "32": "toolbar-32.png"}},
+  "content_scripts": [{"matches": ["https://www.kleinanzeigen.de/*"], "js": ["content-bootstrap.js", "protocol.js", "messaging-read.js", "content.js"], "run_at": "document_end", "all_frames": false}],
+  "content_security_policy": "script-src 'self'; object-src 'none'"
+}

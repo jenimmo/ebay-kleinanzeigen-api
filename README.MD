@@ -62,8 +62,9 @@ The API will be available at `http://localhost:8000`
 
 #### Browser mode
 
-The current browser manager always launches Chromium in headless mode. A
-`HEADLESS` environment switch is not implemented.
+The public listing browser always launches Chromium in headless mode. A
+`HEADLESS` environment switch is not implemented. The separate messaging browser
+uses visible Google Chrome; see the messaging configuration below.
 
 ### Installation using UV
 
@@ -222,9 +223,47 @@ Both clients then launch this STDIO command themselves:
 /Users/matthias/Documents/ChatGPT/Kleinanzeigen\ API/.venv/bin/kleinanzeigen-mcp
 ```
 
+#### Python-Änderungen in die lokale MCP-Installation übernehmen
+
+Der installierte Entry-Point lädt eine normale Wheel-Kopie aus
+`.venv/lib/python3.12/site-packages`. Nach Änderungen am Python-Code muss diese
+Kopie aus dem Projektordner aktualisiert werden:
+
+```sh
+# Im Projektstamm ausführen
+uv pip install --python .venv/bin/python --offline --no-deps --reinstall .
+```
+
+Dieser geprüfte Befehl verwendet Build-Isolation und den vorhandenen lokalen
+Build-Cache. Er aktualisiert nur das Projektpaket in der Projekt-Venv; die
+Runtime-Venv benötigt dafür kein separat installiertes `setuptools`.
+Die editierbare Installation funktioniert in dieser Umgebung nicht zuverlässig:
+Ihre erzeugte `__editable__*.pth` trug das macOS-Dateiflag `UF_HIDDEN`, und der
+verwendete CPython 3.12.13 überspringt solche Startupdateien. Es wurden keine
+globalen Python- oder Dateiflag-Regeln geändert.
+
+Tests oder `python -m` aus dem Projektordner können den aktuellen Quellcode
+laden, während der ausführbare MCP-Entry-Point noch eine ältere Wheel-Kopie
+verwendet. Deshalb nach einer Neuinstallation zusätzlich aus einem fremden
+Arbeitsverzeichnis prüfen: Importpfad und installierten Code mit dem Source
+vergleichen und den echten `.venv/bin/kleinanzeigen-mcp`-Entry-Point testen.
+Am 4. November 2026 wurden aus `/private/tmp` mit deaktiviertem Autostart
+Initialisierung, alle 18 Werkzeuge und der rein lokale Aufruf `list_accounts`
+über STDIO sowie HTTP erfolgreich geprüft; der installierte Launcher entsprach
+dem Source einschließlich des Socket-Neustartfixes.
+
+Bereits laufende MCP-Adapter und das Backend behalten ihre geladenen Module.
+Die Neuinstallation ersetzt daher keinen anschließenden geordneten Neustart
+dieser Prozesse. Vor einem Backendwechsel müssen laufende Versandversuche
+abgeschlossen beziehungsweise eindeutig als unklar gespeichert sein; unklare
+Aufträge werden nicht automatisch erneut gesendet.
+
+#### Startverhalten
+
 The MCP handshake and tool discovery complete without waiting for Chromium.
 The first actual tool call reuses a healthy compatible backend when one exists.
-If none exists, it reserves a free `127.0.0.1` port, acquires a cross-process
+If none exists, it reserves the configured loopback port, or a free `127.0.0.1`
+port when no explicit address is set, acquires a cross-process
 startup lock, starts exactly one detached Uvicorn process with one worker, and
 waits for backend readiness up to the configured startup timeout.
 Uvicorn output is written to a private rotating log instead of MCP `stdout`.
@@ -251,6 +290,55 @@ The relevant launcher settings are:
 | `KLEINANZEIGEN_MCP_BACKEND_DIRECTORY` | detected project root | Absolute working directory containing `main.py`. |
 | `KLEINANZEIGEN_API_BASE_URL` | dynamically discovered | Reuse or start one explicit compatible loopback API; with autostart disabled, the fallback is `http://127.0.0.1:8000`. |
 
+#### Dauerhafte Safari-Konfiguration
+
+Die Projektkonfigurationen `.mcp.json` und `.codex/config.toml` verwenden den
+Safari-Adapter und starten das Backend bei Bedarf auf `http://127.0.0.1:50489`.
+Passe die absoluten Pfade in der Startkonfiguration an deine Installation an.
+Verwenden mehrere Clients oder ein Personal-Plugin denselben Connector, brauchen
+sie dieselbe API-Adresse und denselben Archivpfad. Das Arbeitsverzeichnis ist
+der Projektstamm. Die Suchjobs liegen unter `data/kleinanzeigen_jobs.sqlite3`,
+die Laufzeitdatei und die Backend-Logs unter `data/.mcp-runtime/`.
+
+Der Connector läuft im **Normalbetrieb** mit
+`KLEINANZEIGEN_MESSAGING_TEST_MODE=false`. Neue beauftragte Nachrichten können
+über die verbundenen Accounts an reguläre Gesprächspartner gesendet werden.
+Für einen Versandtest konfigurierst du die beiden eigenen Accounts, ihre
+verifizierten Nutzer-IDs und die eigene Testanzeige lokal beim Backendstart.
+Die Einstellungen stehen unter [Nachrichtentests ausschließlich eigener Accounts](#nachrichtentests-ausschließlich-eigener-accounts).
+
+Der erste Werkzeugaufruf verwendet das laufende Backend oder startet es nach
+einem Mac-Neustart. Eine geordnete Übergabe von einem manuell gestarteten Backend
+an den Autostart wurde über STDIO mit `list_accounts` geprüft.
+
+Am gleichen Port und Datenpfad verwendet Safari den bestehenden privaten
+Verbindungsschlüssel weiter; ein normaler Backendneustart erfordert keinen
+erneuten Import der Kopplungsdatei. Nach einem Safari-Neustart können Tab-IDs
+wechseln: `connect_account` versucht im bereits gebundenen Profil genau einen
+passenden Konto- oder Nachrichten-Tab wiederzufinden und dessen Nutzer-ID frisch
+zu prüfen. Fehlt ein eindeutiger Tab, bleibt die manuelle Zuordnung über
+„Diesen Tab verbinden“ erforderlich. Archivzugriff benötigt keinen offenen Chat.
+
+Das Fenster **Kleinanzeigen Safari** dient nur zur Einrichtung und zum Import der
+Kopplungsdatei. Es darf nach der Kopplung geschlossen werden; beim Schließen des
+letzten Fensters beendet sich die Host-App. Die aktivierte Erweiterung arbeitet
+unabhängig davon in Safari weiter. Für Live-Zugriffe müssen Safari und die
+zugeordneten Kontotabs verfügbar sein. Ein dauerhaft geöffnetes Host-Fenster oder
+laufendes Dockprogramm ist nicht erforderlich; ein angehefteter Dockeintrag ist
+nur eine Verknüpfung. Archivdaten und exportierte HTML-Dateien bleiben ohne
+Safari-Anmeldung lesbar.
+
+Die eigenen App- und Erweiterungsicons zeigen eine Sprechblase mit Archivablage.
+Vektorvorlagen, ICNS und monochrome Toolbar-Varianten liegen in
+`safari-extension/assets/`. Der eng begrenzte Ressourcen-Updateweg ist in der
+[Safari-Dokumentation](safari-extension/README.md#icons-und-host-fenster) beschrieben.
+
+Der laufende HTTP-MCP stellt 18 Werkzeuge bereit, einschließlich der bisherigen
+acht. Zeigt ein bestehender Client nach einem Pluginupdate weiterhin nur acht,
+muss dessen MCP-Verbindung beziehungsweise Werkzeugkatalog neu geladen werden;
+dafür kein zweites Backend starten. Die gespeicherte Konfiguration und die
+Offline-Prüfungen ersetzen noch keine bestandene Nachrichtenabnahme.
+
 #### Optional manually managed HTTP transport
 
 For direct HTTP MCP use, start the shared API yourself, bind only to loopback,
@@ -268,12 +356,13 @@ to the SDK's Host-header protection, the MCP route rejects non-loopback network
 peers even if the surrounding API was accidentally bound more broadly.
 
 Configure either HTTP or STDIO under the MCP name `kleinanzeigen`, not both at
-the same time. Both expose the identical eight-tool catalog and use the same
+the same time. Both expose the identical tool catalog and use the same
 FastAPI job scheduler.
 
 #### MCP tools
 
-The server exposes eight tools:
+The existing search and detail workflow exposes these eight tools. The messaging
+tools are described separately below:
 
 | Tool | Purpose |
 |---|---|
@@ -329,7 +418,7 @@ codex mcp list
 ```
 
 Codex stores timeout values in seconds. Restart the Codex client after changing
-the configuration, then use `/mcp` to inspect the connection and eight tools.
+the configuration, then use `/mcp` to inspect the connection and available tools.
 For a separately managed HTTP backend, replace the STDIO entry with:
 
 ```toml
@@ -387,6 +476,332 @@ any other configured servers, and restart Claude Desktop:
 
 Restart Claude Desktop after saving. It launches the STDIO adapter itself; no
 terminal with Uvicorn has to remain open.
+
+### Nachrichten, Bilder und mehrere Accounts
+
+Die Nachrichtenfunktionen ergänzen die bestehende Suche im selben lokalen
+Backend. Sie unterstützen getrennte angemeldete Accounts, Gesprächsübersichten,
+Chatverläufe, Erstnachrichten über eine Anzeige und Antworten mit Text und Bildern.
+Es gibt keine automatischen Antworten und keine regelmäßige Vollsynchronisierung.
+
+Die Offline-Verträge und Versandzustände sind getestet. Die private
+Kleinanzeigen-Oberfläche muss vor dem produktiven Einsatz mit den eigenen
+angemeldeten Testaccounts abgeglichen werden. Unbekannte Formulare oder nicht
+eindeutig erkennbare Account-/Empfänger-IDs ergeben `ui_unsupported`; die
+Erweiterung sendet dann nicht auf Verdacht.
+
+#### Accounts anmelden
+
+1. Mit `connect_account(account_id="privat", label="Privat")` einen eigenen
+   lokalen Accountnamen anlegen. Für einen zweiten Account einen anderen Namen
+   verwenden, beispielsweise `zweiter-account`.
+2. Im geöffneten Browserfenster selbst bei Kleinanzeigen anmelden und eventuell
+   angeforderte SMS-, E-Mail- oder App-Bestätigungen durchführen. Zugangsdaten
+   werden nicht als Toolparameter übermittelt.
+3. Mit `get_message_operation` den Anmeldeauftrag und mit `list_accounts` die
+   gebundene Kleinanzeigen-Nutzer-ID prüfen. Bei abgelaufener Sitzung meldet das
+   Backend `reauth_required`; denselben Account erneut über `connect_account`
+   anmelden.
+
+Jede Nachrichtenoperation nennt den Account ausdrücklich. Ein bereits gebundenes
+Profil darf bei einer erneuten Anmeldung nicht unbemerkt zu einem anderen
+Kleinanzeigen-Nutzer wechseln. Die Browserprofile sind vom anonymen Suchbrowser
+getrennt. Die manuelle Anmeldung benötigt eine verfügbare grafische Desktop-Sitzung.
+`disconnect_account` trennt die lokale Sitzung; das Nachrichtenarchiv bleibt erhalten.
+
+Der Nachrichtenbereich verwendet standardmäßig den installierten Google Chrome
+in einem eigenen Profil pro Account. Anmeldung und spätere Nachrichtenzugriffe
+laufen im sichtbaren Browser mit dessen unveränderter Browserkennung. Der
+öffentliche Suchbrowser bleibt davon unabhängig. Chrome muss lokal installiert
+sein; ein fehlgeschlagener Start wechselt nicht automatisch den Browser.
+`KLEINANZEIGEN_MESSAGING_BROWSER_CHANNEL=chromium` wählt ausdrücklich das von
+Playwright installierte Chromium; der Standardwert ist `chrome`. Ein Wechsel zu
+einer älteren Browserversion mit demselben Profil wird nicht empfohlen.
+Browserprofile oder Cookies aus Safari beziehungsweise persönlichen Chrome-Profilen
+werden nicht übernommen.
+
+Mit `KLEINANZEIGEN_MESSAGING_BROWSER_CHANNEL=safari` verwendet der
+Nachrichtenbereich die lokale Safari-Erweiterung. Diese arbeitet in den normalen,
+manuell angemeldeten Safari-Profilen. Für jeden Account ist ein eigenes Profil
+erforderlich. Safari selbst liefert der nativen Erweiterung die Profilkennung;
+die API bindet sie erst nach Prüfung der angemeldeten Kleinanzeigen-Nutzer-ID an
+`account_id`. Cookies und Passwörter verbleiben in Safari. Der öffentliche
+Suchbrowser wird durch diese Einstellung nicht verändert.
+
+Build und Einrichtung stehen in [safari-extension/README.md](safari-extension/README.md).
+Beim Start des Safari-Backends entsteht die private Datei
+`data/messaging/safari-pairing.json`. Sie wird einmal in die signierte lokale
+Safari-Host-App importiert und enthält einen lokalen Verbindungsschlüssel, keine
+Kleinanzeigen-Sitzungsdaten. Nicht weitergeben oder einchecken. Der native Host
+spricht ausschließlich die konfigurierte Loopback-Route
+`/messaging/safari-bridge/exchange` an. Normale Webseiten dürfen diese Route
+auch mit gleicher Origin nicht verwenden; der JSON-Grenzwert bleibt 64 KiB.
+Bilddaten werden in begrenzten Abschnitten übertragen.
+
+Bei manuellem API-Start muss `KLEINANZEIGEN_MESSAGING_SAFARI_ENDPOINT` zur
+tatsächlichen Adresse passen, zum Beispiel
+`http://127.0.0.1:8000/messaging/safari-bridge/exchange`. Der MCP-Autostart setzt
+die Adresse aus dem tatsächlich reservierten lokalen Port. Bei einem Portwechsel
+muss die neu erzeugte Verbindungsdatei erneut importiert werden; der private
+Verbindungsschlüssel bleibt bei einem normalen Neustart erhalten.
+
+`connect_account` stellt bei vorhandener verifizierter Profilbindung zunächst
+deren Tab-Zuordnung lesend wieder her. Es akzeptiert dafür genau eine bekannte
+Konto- oder Nachrichtenseite und dieselbe frisch geprüfte Nutzer-ID. Ohne diesen
+eindeutigen Nachweis wartet der Auftrag auf die manuelle Zuordnung: Im passenden
+Safari-Profil auf Kleinanzeigen anmelden, die Erweiterung öffnen und den
+wartenden Account zuordnen. Safari-Fenster bleiben beim Trennen oder Beenden
+des Backends geöffnet; `disconnect_account` widerruft nur die API-Zuordnung.
+Die Erweiterung fragt lediglich nach lokalen API-Aufträgen und synchronisiert
+das Postfach nicht regelmäßig im Hintergrund. Nicht eindeutig erkannte
+Chat-Strukturen oder Bildfunktionen liefern eine ausdrückliche Einschränkung.
+Ein ausgelieferter Versandauftrag wird auch nach Verbindungsabbruch niemals
+automatisch erneut zugestellt.
+
+Ein Bildversand wird erst nach einer separaten, frischen Chatnavigation
+bestätigt. Die echte Server-Nachrichten-ID, der Empfänger und das dort eindeutig
+zugeordnete Bild müssen zum Versandbeleg passen. Der Hash der von Kleinanzeigen
+erzeugten JPEG-Vorschau wird getrennt vom Hash des ursprünglichen Uploads
+gespeichert. Vorschauhash und gegebenenfalls ein begrenzter, exakt definierter
+Pixelbeleg werden vor dem einzigen Sendeklick dauerhaft bestätigt. Der spätere
+Beleg muss entweder dieselben Bildbytes oder exakt dasselbe Pixelraster enthalten;
+eine bloß ähnliche Darstellung genügt nicht. Uploadoriginale und tatsächlich
+abgerufene Serveranhänge bleiben im Archiv getrennt. Unklare Bildzuordnungen
+bleiben ausdrücklich unverfügbar; ein
+fehlender Beleg führt niemals zu einem zweiten automatischen Sendeklick.
+
+Diese Erweiterung ist für macOS vorgesehen und verwendet in Manifest V2 eine
+persistente Hintergrundseite. So kann sie lokale API-Aufträge auch bei
+geschlossenem Erweiterungsmenü empfangen; die nichtpersistente Variante wurde
+von Safari zwischen Aufträgen entladen. Apple unterstützt
+[persistenten Hintergrundinhalt nur unter macOS](https://developer.apple.com/documentation/webkit/wkwebextension/haspersistentbackgroundcontent)
+und beschreibt das
+[Entladen nichtpersistenter Hintergrundseiten](https://developer.apple.com/documentation/safariservices/optimizing-your-web-extension-for-safari).
+Im Leerlauf wird ausschließlich die lokale Queue alle fünf Sekunden geprüft,
+bei wartender Anmeldung oder unmittelbar nach einem Auftrag jede Sekunde.
+Content-Skripte benötigen keinen Heartbeat. Ohne API-Auftrag erfolgen keine
+Kleinanzeigen-Abfragen; dies ist kein periodischer Postfachabgleich.
+
+Private und gewerbliche Accounts können unterschiedliche Oberflächen verwenden:
+privat `/m-meine-anzeigen.html` und `/m-nachrichten.html`, im beobachteten
+Business-Portal `/portal/anzeigen` und `/portal/nachrichten`. Die Erweiterung
+akzeptiert nur diesen ausdrücklich geprüften Wechsel der eigenen Anzeigen-Seite
+und speichert den erkannten Pfad zusammen mit der verifizierten Nutzer-ID im
+jeweiligen Safari-Profil. Das ist keine Freigabe beliebiger Weiterleitungen.
+Die Safari-Abnahme mit zwei eigenen Testaccounts umfasste die Profilbindung,
+das Wiederfinden von Kontotabs, die Postfachpaginierung und den Austausch von
+Text und Bildern. Beim Erstkontakt lieferte die API eine Gesprächs-ID. Zum
+Prüfen der Bildantwort wurden Vorschau- und Pixelbelege vor dem Sendeklick
+gespeichert und mit dem später abgerufenen Bild verglichen. Nach einem
+Backendneustart ließen sich die archivierten Nachrichten und Bilder über
+STDIO und HTTP lesen.
+
+`GET /messaging/safari-bridge/status` liefert für die lokale Fehlerdiagnose den
+letzten bestätigten Poll der nativen Erweiterung sowie Anzahlen und Zustände
+wartender Aufträge. Die Route führt keine Browseraktion aus und gibt weder
+Verbindungsschlüssel noch Nutzer-IDs, URLs oder Nachrichteninhalte zurück.
+
+Eine während der manuellen Anmeldung erkannte Zugriffssperre wird als `blocked`
+mit dem konkreten Sperrfehler gemeldet. Sie wird nicht als falsches Passwort oder
+gewöhnlich abgelaufene Sitzung behandelt; die Anmeldung wird nicht automatisch
+wiederholt.
+Nach erfolgreicher Anmeldung bleibt das Accountfenster geöffnet. Wird während
+der manuellen Anmeldung eine Sperre erkannt, bleibt die geladene Seite zur
+Prüfung sichtbar, während die Automatik anhält. Ein erneuter ausdrücklicher
+`connect_account`-Aufruf prüft die vorhandene Anmeldeseite nur lesend und setzt
+keine Zugriffssperre zurück. `disconnect_account` oder das Beenden des Backends
+schließt die zugehörigen Browserfenster.
+Versteckte CAPTCHA-Elemente allein gelten nicht als aktive Sperrseite. Bei einer
+erkannten Sperre nennt `block_indicator` einen festen Erkennungsgrund, ohne
+Seiteninhalte, Anmeldedaten oder vollständige URLs zu speichern.
+
+Der Ressourcenfilter unterscheidet das Hauptfenster von eingebetteten
+Anmeldekomponenten. Beobachtete Prüfressourcen und sichere Kleinanzeigen-WebSockets
+sind eng begrenzt zugelassen; private Netzwerkziele und fremde Hauptnavigationen
+bleiben gesperrt. Service Worker bleiben deaktiviert, damit die Request-Prüfung
+auch für Hintergrundanfragen greift.
+
+#### Nachrichtenwerkzeuge
+
+| MCP-Werkzeug | Verwendung |
+|---|---|
+| `list_accounts` | Accountstatus, gebundene Nutzer-IDs und serverseitige Testfreigaben lesen. |
+| `connect_account` | Eine manuelle Anmeldung oder erneute Anmeldung im Browser starten. |
+| `disconnect_account` | Lokale Accountsitzung trennen. |
+| `list_conversations` | Gesprächsübersichten seitenweise abrufen, optional nur ungelesene Gespräche. |
+| `get_conversation` | Nachrichten und Bildreferenzen eines Gesprächs live oder aus dem Archiv lesen. |
+| `get_message_image` | Ein archiviertes Bild als darstellbaren Bildinhalt abrufen. |
+| `upload_message_images` | Ausdrücklich angegebene lokale Bilddateien bereitstellen und Anhangs-IDs erhalten. |
+| `start_conversation` | Eine beauftragte erste Nachricht an eine konkrete Anzeige senden. |
+| `send_message` | Eine beauftragte Nachricht in einem bestehenden Gespräch senden. |
+| `get_message_operation` | Den Zustand eines Anmelde- oder Versandauftrags prüfen. |
+
+Für Bilder zunächst `upload_message_images` mit Account und absoluten lokalen
+Dateipfaden aufrufen; danach die zurückgegebenen `attachment_ids` an den
+Versandauftrag übergeben. Lokale Schutzgrenzen sind 20 MiB pro Datei, 40 Millionen
+Pixel, maximal 20 Anhänge und 20.000 Textzeichen. PNG-, JPEG-, GIF- und WebP-Inhalte
+werden auf tatsächliches Bildformat geprüft. Das sind **lokale Schutzgrenzen**,
+keine Zusicherung der Kleinanzeigen-Grenzen. Die angemeldete Oberfläche muss das
+Format und den Bildversand am konkreten Ziel zusätzlich unterstützen. Bei einer
+nicht erkannten oder nicht angebotenen Funktion wird ein entsprechender Fehler
+zurückgegeben, nicht stillschweigend ein Bild weggelassen.
+
+Wenn die Anzeige Bilder erst im bestehenden Chat zulässt, kann der Erstkontakt
+aus einem Textschritt und anschließenden Bildschritten bestehen. Ein erfolgreicher
+Text mit fehlgeschlagenem Bild wird als Teilerfolg gemeldet. `operation_id` und
+Schrittzustände deshalb aufbewahren und mit `get_message_operation` prüfen.
+
+Jeder Versand benötigt einen stabilen `idempotency_key`. Derselbe Schlüssel mit
+demselben Account, Ziel und Inhalt bezeichnet denselben Auftrag, auch nach einem
+Neustart. Ein veränderter Inhalt mit demselben Schlüssel wird abgewiesen. Bei
+`outcome_unknown` kann Kleinanzeigen bereits gesendet haben: Den vorhandenen
+Auftrag und das Gespräch prüfen, **keinen neuen Versandauftrag erzeugen**. Der
+Service wiederholt einen möglicherweise ausgeführten Sendeschritt nicht
+automatisch. Wiederholung eines bestätigten Textschritts ist auch bei einem
+fehlgeschlagenen Folgebild ausgeschlossen.
+
+#### Lokales Archiv und REST-Zugriff
+
+Standardmäßig liegen die privaten Daten im Projekt unter `data/messaging/`:
+`messaging.sqlite3`, getrennte Browserprofile und Bilddateien.
+`KLEINANZEIGEN_MESSAGING_DIR` kann diesen Datenordner überschreiben. Der Ordner
+wird nicht in Git aufgenommen und mit privaten Dateirechten angelegt. Sitzungsdaten
+und Nachrichteninhalte gehören nicht in Logs oder Projektberichte.
+
+Das Archiv bewahrt tatsächlich abgerufene Nachrichten und zugehörige Bilder
+dauerhaft auf, ohne automatische Löschfrist. Die Postfachauflistung allein lädt
+weiterhin keine vollständigen Gesprächsverläufe. Ein ausdrücklich gestarteter
+Accountimport kann alle zu diesem Zeitpunkt erreichbaren Gespräche und deren
+Nachrichtenseiten nacheinander sichern.
+Live- und Archivantworten kennzeichnen ihre Quelle; `source="archive"` liest
+bereits gespeicherte Daten ohne Kleinanzeigen-Abruf. Eine später entfernte Anzeige
+oder Nachricht löscht das lokale Archiv nicht. Das Öffnen eines Live-Chats kann
+ihn bei Kleinanzeigen als gelesen markieren.
+
+Beim ersten Live-Seitenabruf eines Gesprächs über Safari werden zusätzlich
+zuordenbare Anbieterinformationen aus der verknüpften Anzeige, deren
+eingeklapptem Impressum und dem öffentlichen Profil des Gegenübers gelesen.
+`provider_context` enthält gespeicherte Momentaufnahmen mit Quelle, Abrufzeit
+und verifizierter Gegenüber-ID sowie den letzten Prüfstatus je Quelle.
+Veränderte Angaben erzeugen weitere Momentaufnahmen; fehlende oder später
+gelöschte Seiten entfernen keine vorhandenen Angaben. Gehört die Anzeige dem
+eigenen Account, wird dessen Impressum nicht dem Gesprächspartner zugeschrieben.
+Nicht erreichbare oder nicht eindeutig zuordenbare Informationen werden
+ausdrücklich gekennzeichnet. Plattformereignisse werden als `system_events`
+getrennt von den eigentlichen Nachrichten gesichert; bei nicht unterstützten
+Inhalten wird keine vollständige Erfassung behauptet.
+
+Die ergänzenden öffentlichen Anzeigen- und Profilseiten werden ohne Cookies
+abgerufen (`credentials: "omit"`). PRO-Anbieter mit einer eigenen Profiladresse
+werden über deren exakte kanonische URL und zwei übereinstimmende numerische
+Nutzerkennungen in bekannten Profilkomponenten der Gesprächspartei zugeordnet.
+Die gefundenen PRO-Angaben und die Daten des zusätzlichen numerischen
+Nutzerprofils werden gemeinsam in einem begrenzten Profil-Snapshot gesichert;
+jeder Textabschnitt nennt seine eigene Quell-URL. Größenbegrenzungen und noch
+nicht unterstützte Profilstrukturen werden als gekürzte beziehungsweise
+unvollständige Erfassung kenntlich gemacht.
+
+Ein einmaliger, fortsetzbarer Import wird bewusst über das lokale Hilfsskript
+gestartet. Es verwendet ausschließlich lesende REST-Aufrufe; die bestehenden
+Zugriffslimits und die Serialisierung je Account bleiben wirksam. Bei
+Anmeldeproblemen oder einer Zugriffssperre hält der Lauf an. Der private Bericht
+enthält IDs und Erfassungsstände, keine Nachrichtentexte. Derselbe Bericht setzt
+einen unterbrochenen Lauf fort; für einen neuen Stand einen neuen Bericht wählen:
+
+```bash
+.venv/bin/python script/archive_messaging_account.py \
+  --account-id privat \
+  --report data/messaging/imports/private-account.json
+```
+
+Für langfristigen Zugriff unabhängig von API, Safari oder Kleinanzeigen kann
+ein eigenständiger Export erstellt werden:
+
+```bash
+.venv/bin/python script/export_messaging_archive.py --account-id privat
+```
+
+Der ausgegebene neue Ordner unter `data/messaging/exports/` enthält `index.html`,
+`archive.json`, einzelne Gesprächsseiten, Bilddateien und ein Manifest mit
+SHA-256-Prüfsummen. `index.html` lässt sich ohne Anmeldung und Internetverbindung
+in einem Browser öffnen. Der Export enthält keine Cookies, Browserprofile oder
+Zugangsdaten. SQLite bleibt das Arbeitsarchiv; HTML und JSON sind transportable,
+offene Formate. Der vollständige Exportordner gehört zusätzlich in ein
+unabhängiges Backup: Eine weitere Kopie auf demselben Datenträger schützt nicht
+vor dessen Ausfall. Vor dem ersten Abruf gelöschte Inhalte können nicht
+nachträglich wiederhergestellt werden.
+
+Die REST-Schnittstelle beginnt mit `GET /messaging/accounts`. Alle weiteren
+Routen liegen unter `/messaging/accounts/{account_id}`:
+
+| Route | Methode und Inhalt |
+|---|---|
+| `/connect`, `/disconnect` | `POST`; Anmeldung mit optionalem `label`, beziehungsweise Sitzung trennen. |
+| `/conversations` | `GET` mit `source`, `cursor`, `limit` und optional `unread_only`. |
+| `/conversations/{conversation_id}` | `GET` mit `source`, `cursor` und `limit`. |
+| `/images/{image_id}` | `GET`; archiviertes Bild als Binärantwort. |
+| `/attachments` | `POST`; rohe Bildbytes, Bild-`Content-Type` und optional `X-Filename`. |
+| `/start-conversation` | `POST` mit `listing_id`, `text`, `attachment_ids`, `idempotency_key`. |
+| `/send-message` | `POST` mit `conversation_id`, `text`, `attachment_ids`, `idempotency_key`. |
+| `/operations/{operation_id}` | `GET`; aktueller persistierter Auftragszustand. |
+
+Die privaten Routen sind nur lokal erreichbar und weisen fremde Browser-Origins
+ab. Das bestehende 64-KiB-Limit für JSON bleibt bestehen; ausschließlich die
+Bild-Uploadroute hat ein größeres, begrenztes Binärlimit.
+
+#### Nachrichtentests ausschließlich eigener Accounts
+
+Der normale Offline-Testlauf und `pytest --run-live` versenden keine Nachrichten.
+Schreibtests benötigen **zusätzlich zum serverseitigen Testmodus** den separaten
+Schalter `--run-live-messaging`. Vorher zwei eigene Accounts manuell anmelden und
+eine bestehende eigene Anzeige des zweiten Accounts auswählen. Die tatsächlichen
+Kleinanzeigen-Nutzer-IDs aus `list_accounts` übernehmen, keine E-Mail-Adressen oder
+Anzeigen anderer Nutzer als Freigaben verwenden.
+
+Folgende Einstellungen werden beim Start des Backends gelesen:
+
+| Einstellung | Bedeutung |
+|---|---|
+| `KLEINANZEIGEN_MESSAGING_TEST_MODE=true` | Alle Nachrichtenversände serverseitig auf die Testfreigaben begrenzen. |
+| `KLEINANZEIGEN_MESSAGING_TEST_ACCOUNT_IDS` | Kommagetrennte lokale IDs der beiden eigenen Accounts. |
+| `KLEINANZEIGEN_MESSAGING_TEST_USER_IDS` | Kommagetrennte verifizierte Kleinanzeigen-Nutzer-IDs dieser Accounts. |
+| `KLEINANZEIGEN_MESSAGING_TEST_LISTING_IDS` | Explizite Anzeigen-IDs eigener Testanzeigen. |
+
+Im Testmodus erlauben fehlende oder unpassende Freigaben keinen Versand. Die
+Backend-Einstellungen gelten auch für Aufträge, die nicht vom Testskript kommen.
+Ein bereits laufendes Backend muss mit der passenden Konfiguration neu gestartet
+werden; Umgebungsvariablen nur im Testterminal ändern nicht seinen Testmodus.
+
+Der Testprozess verwendet `KLEINANZEIGEN_LIVE_BASE_URL` sowie
+`KLEINANZEIGEN_LIVE_MESSAGING_ACCOUNT_A`,
+`KLEINANZEIGEN_LIVE_MESSAGING_ACCOUNT_B`,
+`KLEINANZEIGEN_LIVE_MESSAGING_LISTING_ID` und die verpflichtende
+`KLEINANZEIGEN_LIVE_MESSAGING_RUN_ID`. Die Laufkennung muss bewusst gewählt
+werden: 1–64 ASCII-Buchstaben, Ziffern, Unterstriche oder Bindestriche, beginnend
+mit einem Buchstaben oder einer Ziffer. Für denselben beauftragten Testlauf
+einschließlich Wiederholungen bleibt sie unverändert; sie bestimmt die
+Idempotenzschlüssel der Versandaufträge. Der Test erzeugt keine zufällige neue
+Laufkennung. Er überprüft die Serverfreigaben und den
+Eigentümer der Anzeige vor dem ersten Versand. Erst dann versendet er einen
+gekennzeichneten Testtext und ein selbst erzeugtes harmloses Bild zwischen den
+eigenen Accounts. Es wird keine Anzeige erstellt.
+
+```sh
+export KLEINANZEIGEN_LIVE_MESSAGING_RUN_ID='eigener-test-01'
+uv run pytest tests/test_messaging_live.py --run-live-messaging -m live_messaging
+```
+
+Bei `outcome_unknown` ausschließlich den bestehenden Auftragsstatus und das
+eigene Gespräch lesend prüfen. Den Test nicht blind wiederholen und keine neue
+Laufkennung vergeben, um einen unklaren Ausgang zu umgehen. Eine neue Kennung
+gehört nur zu einem bewusst neu beauftragten Testlauf.
+
+Der Test prüft Erstkontakt, Bildempfang, Antwort, Bildabruf und Archivzugriff.
+Wiederanlauf und unklare Versandausgänge werden mit Offline-Tests geprüft; ein
+Backendneustart während echter Versände wird nicht vom Live-Harness ausgelöst.
+Die tatsächliche Kleinanzeigen-Oberfläche und ihre Bildfunktionen benötigen eine
+Abnahme nach der Anmeldung. Ein bestandener Offline-Test ersetzt diese Abnahme
+nicht. Weitere Hinweise stehen in `tests/README.md`.
 
 #### Large results and client limits
 

@@ -4,6 +4,10 @@ from dataclasses import replace
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from messaging.browser import MessagingBrowserAdapter
+from messaging.contracts import MAX_IMAGE_BYTES, MessagingSettings
+from messaging.service import MessagingService
+from messaging.safari_config import export_safari_pairing
 from kleinanzeigen_mcp.server import (
     asgi_client_factory,
     create_mcp_server,
@@ -18,12 +22,13 @@ from routers import (
     convert_url,
     inserate_by_url,
     jobs,
+    messaging,
 )
 from scrapers.inserat import DetailExtractionError, execute_detail_page
 from scrapers.inserate_ultra_optimized import SearchExtractionError, execute_search_page
 from utils.browser import OptimizedPlaywrightManager
 from utils.asyncio_optimizations import EventLoopOptimizer
-from utils.http_security import RequestBodyLimitMiddleware
+from utils.http_security import MessagingAccessMiddleware, RequestBodyLimitMiddleware
 from utils.job_manager import (
     DetailItemResult,
     DetailTask,
@@ -44,17 +49,19 @@ from utils.outbound_control import (
 browser_manager = None
 outbound_controller = None
 job_manager = None
+messaging_service = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle - startup and shutdown events"""
-    global browser_manager, outbound_controller, job_manager
+    global browser_manager, outbound_controller, job_manager, messaging_service
 
     # Validate outbound limits before allocating or configuring runtime resources.
     # Invalid environment values deliberately abort startup with a clear ValueError.
     outbound_settings = OutboundSettings.from_env()
     parsed_job_settings = JobSettings.from_env()
+    messaging_settings = MessagingSettings.from_env()
     legacy_retry_name = "KLEINANZEIGEN_JOB_RETRY_BUDGET"
     if (
         legacy_retry_name in os.environ
@@ -155,6 +162,31 @@ async def lifespan(app: FastAPI):
         app.state.browser_manager = browser_manager
         app.state.job_manager = job_manager
         app.state.uvloop_enabled = uvloop_enabled
+        app.state.safari_bridge = None
+        if messaging_settings.browser_channel == "safari":
+            from messaging.safari import SafariBridge, SafariMessagingAdapter
+
+            bridge = SafariBridge(messaging_settings.root)
+            adapter = SafariMessagingAdapter(
+                messaging_settings.root, outbound_controller, bridge
+            )
+            app.state.safari_bridge = bridge
+        else:
+            adapter = MessagingBrowserAdapter(
+                messaging_settings.root,
+                outbound_controller,
+                browser_channel=messaging_settings.browser_channel,
+            )
+        messaging_service = MessagingService(messaging_settings, adapter)
+        await messaging_service.start()
+        app.state.messaging_service = messaging_service
+        if app.state.safari_bridge is not None:
+            export_safari_pairing(
+                messaging_settings.root,
+                app.state.safari_bridge.pairing_config(
+                    messaging_settings.safari_endpoint
+                ),
+            )
         # An MCP ASGI app delegated through an exact Route does not receive its
         # own lifespan. Start its stateful session manager after the shared
         # browser and durable scheduler, and stop it before their teardown.
@@ -163,25 +195,37 @@ async def lifespan(app: FastAPI):
     finally:
         # Stop durable workers before tearing down their shared browser state.
         try:
-            if job_manager is not None:
-                await job_manager.close()
+            if messaging_service is not None:
+                await messaging_service.close()
         finally:
             try:
-                await outbound_controller.close()
+                if job_manager is not None:
+                    await job_manager.close()
             finally:
                 try:
-                    await browser_manager.close()
+                    await outbound_controller.close()
                 finally:
-                    app.state.outbound_controller = None
-                    app.state.browser_manager = None
-                    app.state.job_manager = None
-                    outbound_controller = None
-                    browser_manager = None
-                    job_manager = None
+                    try:
+                        await browser_manager.close()
+                    finally:
+                        app.state.outbound_controller = None
+                        app.state.browser_manager = None
+                        app.state.job_manager = None
+                        app.state.messaging_service = None
+                        app.state.safari_bridge = None
+                        outbound_controller = None
+                        browser_manager = None
+                        job_manager = None
+                        messaging_service = None
 
 
 app = FastAPI(version="1.0.0", lifespan=lifespan)
-app.add_middleware(RequestBodyLimitMiddleware, max_body_size=64 * 1024)
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    max_body_size=64 * 1024,
+    messaging_upload_max_size=MAX_IMAGE_BYTES,
+)
+app.add_middleware(MessagingAccessMiddleware)
 
 
 ACTIVE_ENDPOINTS = [
@@ -194,6 +238,16 @@ ACTIVE_ENDPOINTS = [
     "/jobs/{job_id}/continue",
     "/jobs/{job_id}/resume",
     "/mcp",
+    "/messaging/accounts",
+    "/messaging/accounts/{account_id}/connect",
+    "/messaging/accounts/{account_id}/disconnect",
+    "/messaging/accounts/{account_id}/conversations",
+    "/messaging/accounts/{account_id}/conversations/{conversation_id}",
+    "/messaging/accounts/{account_id}/images/{image_id}",
+    "/messaging/accounts/{account_id}/attachments",
+    "/messaging/accounts/{account_id}/start-conversation",
+    "/messaging/accounts/{account_id}/send-message",
+    "/messaging/accounts/{account_id}/operations/{operation_id}",
     "/inserate",
     "/inserat/{id}",
     "/inserate-detailed",
@@ -327,6 +381,7 @@ app.include_router(inserate_batch.router)
 app.include_router(convert_url.router)
 app.include_router(inserate_by_url.router)
 app.include_router(jobs.router)
+app.include_router(messaging.router)
 
 # Keep MCP as a thin in-process client of the canonical REST job contract. An
 # exact ASGI Route delegates all HTTP methods without a catch-all mount, so the

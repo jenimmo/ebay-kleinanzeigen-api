@@ -1,0 +1,9 @@
+:root { color-scheme: light dark; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; }
+body { margin: 18px; width: 290px; }
+h1 { font-size: 18px; margin: 0 0 12px; }
+p { line-height: 1.45; }
+label { display: block; margin-bottom: 6px; }
+select, button { box-sizing: border-box; width: 100%; padding: 8px; margin-bottom: 9px; font: inherit; }
+button { cursor: pointer; }
+.note { opacity: .7; font-size: 12px; }
+#status { min-height: 2em; }

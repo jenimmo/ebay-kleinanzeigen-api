@@ -27,6 +27,12 @@ from utils.http_security import LoopbackOnlyMiddleware
 
 from .client import BaseUrlProvider, KleinanzeigenClientError, KleinanzeigenJobClient
 from .models import JobResultItem, JobStatus, WaitProgress
+from .messaging import (
+    MESSAGING_INSTRUCTIONS,
+    MESSAGING_TOOL_NAMES,
+    messaging_tool_error,
+    register_messaging_tools,
+)
 from .waiter import collect_search_results, wait_for_job
 
 
@@ -54,6 +60,7 @@ SERVER_INSTRUCTIONS = (
     "übernimm Token und Cursor exakt. Timeouts und Cooldowns beenden oder "
     "stornieren persistente Jobs nicht; starte dann keinen identischen Job neu. "
     "Verwende cancel_job nur, wenn die Arbeit wirklich abgebrochen werden soll."
+    + MESSAGING_INSTRUCTIONS
 )
 
 _IDEMPOTENCY_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
@@ -262,6 +269,8 @@ class _StableToolErrorMiddleware:
             return result
 
         params = ctx.params if isinstance(ctx.params, Mapping) else {}
+        if params.get("name") in MESSAGING_TOOL_NAMES:
+            return messaging_tool_error(ValueError("invalid tool arguments"))
         output_type = _TOOL_OUTPUT_TYPES.get(params.get("name"))
         if output_type is None:
             return result
@@ -970,6 +979,7 @@ def create_mcp_server(client_factory: ClientContextFactory) -> MCPServer:
         except Exception as exc:
             return _tool_error(CancelToolOutput, exc)
 
+    register_messaging_tools(server, _client)
     return server
 
 

@@ -35,6 +35,115 @@ Job-API nicht mehr.
 
 Mit `pytest --markers` lässt sich die registrierte Marker-Beschreibung anzeigen.
 
+## Nachrichten: eigener Live-Schalter und eigene Accounts
+
+Nachrichtentests tragen den Marker `live_messaging`. Der Schalter `--run-live`
+aktiviert sie **nicht**, auch wenn ein Test zusätzlich als `live` markiert wäre.
+Ohne `--run-live-messaging` wird kein Testversand ausgeführt. Zwei Offline-Tests
+in `test_messaging_live.py` prüfen diese Trennung der Schalter.
+
+Vor einem Nachrichtentest müssen im lokalen Backend zwei eigene Accounts über
+`connect_account` manuell angemeldet sein. Der zweite Account muss die bestehende
+Testanzeige besitzen. Der Test erstellt keine Anzeige und öffnet nur die für die
+eigenen Testaccounts zugeordneten Gespräche.
+
+Das Backend muss bereits mit folgenden Einstellungen gestartet sein:
+
+- `KLEINANZEIGEN_MESSAGING_TEST_MODE=true`
+- `KLEINANZEIGEN_MESSAGING_TEST_ACCOUNT_IDS`: beide lokale Account-IDs als CSV
+- `KLEINANZEIGEN_MESSAGING_TEST_USER_IDS`: die verifizierten Kleinanzeigen-Nutzer-IDs
+  beider eigener Accounts als CSV
+- `KLEINANZEIGEN_MESSAGING_TEST_LISTING_IDS`: ausdrücklich ausgewählte eigene
+  Anzeigen-IDs als CSV
+
+Der Testmodus setzt die Grenzen serverseitig bei jedem Versand durch. Fehlende
+oder fremde IDs erlauben keinen Versand. Im Testterminal zusätzlich setzen:
+
+- `KLEINANZEIGEN_LIVE_BASE_URL`: lokale HTTP-Adresse des bereits laufenden Backends,
+  standardmäßig `http://127.0.0.1:8000`
+- `KLEINANZEIGEN_LIVE_MESSAGING_ACCOUNT_A`: lokaler Name des ersten eigenen Accounts
+- `KLEINANZEIGEN_LIVE_MESSAGING_ACCOUNT_B`: lokaler Name des zweiten eigenen Accounts
+- `KLEINANZEIGEN_LIVE_MESSAGING_LISTING_ID`: bestehende eigene Anzeige von Account B
+- `KLEINANZEIGEN_LIVE_MESSAGING_RUN_ID`: verpflichtende, bewusst gewählte Kennung
+  des beauftragten Testlaufs; 1–64 ASCII-Buchstaben, Ziffern, Unterstriche oder
+  Bindestriche, beginnend mit Buchstabe oder Ziffer. Bei Wiederholungen desselben
+  Laufs unverändert beibehalten, damit dieselben Idempotenzschlüssel gelten.
+
+Dann ausschließlich den gezielten Ablauf starten:
+
+```sh
+export KLEINANZEIGEN_LIVE_MESSAGING_RUN_ID='eigener-test-01'
+uv run pytest tests/test_messaging_live.py --run-live-messaging -m live_messaging
+```
+
+Der Harness prüft zunächst Testmodus, Accountbindung und erlaubte IDs. Ein
+öffentlicher Detailjob verifiziert zusätzlich, dass die Anzeige Account B gehört.
+Er erzeugt sein Testbild selbst im Speicher; private lokale Bilder werden nicht
+verwendet. Danach folgen Erstkontakt A → B, Lesen von Text und Bild in B, Antwort
+B → A sowie Lesen und Archivabruf in A. Eine Wiederholung desselben Erstauftrags
+muss dieselbe `operation_id` liefern. Unklare Ergebnisse, Teilversand oder erneute
+Anmeldeanforderung beenden den Test; es wird kein Ersatzauftrag erzeugt.
+
+Die Polling-Grenze kann wie bei den übrigen Live-Tests über
+`KLEINANZEIGEN_LIVE_POLL_TIMEOUT_SECONDS` gesetzt werden. Ein Testabbruch storniert
+keinen angenommenen Versandauftrag. Bei einem unklaren Ergebnis zuerst dessen
+Status und das eigene Gespräch prüfen; den Live-Test nicht blind neu starten.
+Bei `outcome_unknown` zunächst ausschließlich lesen. Keine neue Laufkennung
+vergeben, um einen unklaren Ausgang zu umgehen; eine neue Kennung ist einem
+bewusst neu beauftragten Testlauf vorbehalten. Der Harness generiert keine
+zufälligen Ersatzkennungen.
+
+Die Offline-Suite prüft zusätzlich Trennung der Accounts, Archivpersistenz,
+Idempotenz, Wiederanlauf nach Fehlern und Schutz der privaten Routen. Der Live-Test
+führt keinen Backendneustart aus und stellt keine Plattformfähigkeit allein durch
+Mocks als geprüft dar. Besonders Bildfunktionen müssen nach der manuellen
+Anmeldung an der tatsächlich angebotenen Kleinanzeigen-Oberfläche bestätigt
+werden.
+
+### Safari offline prüfen
+
+Die Safari-Anbindung verwendet denselben Nachrichtenservice und Testmodus. Ihre
+gezielten Prüfungen benötigen weder einen angemeldeten Browser noch Netzwerkzugriff
+auf Kleinanzeigen:
+
+```sh
+.venv/bin/pytest tests/test_messaging_safari.py tests/test_safari_integration.py
+node --test safari-extension/web/tests/*.test.cjs
+./safari-extension/native/test.sh
+```
+
+Geprüft werden unter anderem native Profilbindung, fremde Accounts, private
+Kopplungsdateien, unveränderte HTTP-Grenzen, begrenzte Bildabschnitte und verlorene
+Versandantworten. Die nativen Transporttests verwenden nur einen lokalen Testserver.
+Live-Prüfungen erfordern zusätzlich die signierte und aktivierte Erweiterung;
+Build, Installation und Freigabe sind in
+[Safari-Anbindung](../safari-extension/README.md) beschrieben.
+
+Die Offline-Prüfungen decken die Wiederherstellung gebundener Kontotabs,
+die Zuordnung von Bildanhängen und verlorene Versandbestätigungen ab. Die
+IPv4-/IPv6-Transporttests benötigen die Berechtigung für lokale Listen-Sockets.
+
+### Abnahme von Versand und Archiv
+
+Der Live-Test mit zwei eigenen Accounts bestätigte Erstkontakt, Antwort, Text-
+und Bildempfang sowie den Archivzugriff nach einem Backendneustart. Mit beiden
+MCP-Transporten wurden der Werkzeugkatalog, gespeicherte Gesprächsverläufe und
+JPEG-Inhalte geprüft. Die Prüfsumme des ausgelieferten Bildes stimmte mit dem
+Archiv überein. Ein unterbrochener oder unklar bestätigter Sendeschritt bleibt
+als `outcome_unknown` einsehbar.
+
+Beim historischen Import wurden Gesprächs- und Nachrichtenseiten bis zur letzten
+Seite abgerufen. Der Abgleich prüfte die Gesprächs- und Nachrichten-IDs,
+Zeitpunkte, Anbieterquellen und die Reihenfolge der Bildanhänge. Unterbrochene
+Lesevorgänge lassen sich mit dem privaten Fortschrittsbericht fortsetzen.
+Fehlende Anbieterangaben und nur teilweise unterstützte Plattformereignisse
+bleiben im Ergebnis ausdrücklich gekennzeichnet.
+
+Die Exportprüfung umfasste Dateigrößen und SHA-256-Prüfsummen, die Zuordnung
+der HTML-Seiten und Bilddateien sowie die privaten Dateirechte. Eine separate
+WKWebView öffnete eine Gesprächsseite mit mehreren lokalen Bildern über
+`file://` und bestätigte, dass die Bilder vollständig geladen wurden.
+
 ## Historisches Load Testing Framework
 
 > **Nicht gegen Kleinanzeigen ausführen.** Die folgenden Skripte stammen aus der

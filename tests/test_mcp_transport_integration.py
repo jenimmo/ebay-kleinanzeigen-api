@@ -37,6 +37,16 @@ EXPECTED_TOOLS = {
     "get_job_results",
     "resume_job",
     "cancel_job",
+    "list_accounts",
+    "connect_account",
+    "disconnect_account",
+    "list_conversations",
+    "get_conversation",
+    "get_message_image",
+    "upload_message_images",
+    "start_conversation",
+    "send_message",
+    "get_message_operation",
 }
 _HANDSHAKE_VERSION = "2025-11-25"
 _SUBPROCESS_TIMEOUT_SECONDS = 10.0
@@ -167,7 +177,7 @@ async def test_installed_stdio_entrypoint_speaks_only_mcp_and_stops_on_eof() -> 
         tools_response = await _read_response(process, 2)
         tools = tools_response["result"]["tools"]
         assert {tool["name"] for tool in tools} == EXPECTED_TOOLS
-        assert len(tools) == 8
+        assert len(tools) == 18
 
         await _write_message(
             process,

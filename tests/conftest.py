@@ -40,6 +40,19 @@ def outbound_controller() -> OutboundController:
     return make_test_outbound_controller()
 
 
+@pytest.fixture(autouse=True)
+def isolate_offline_messaging_storage(
+    request: pytest.FixtureRequest, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Offline lifespans must never open or recover the user's real archive."""
+    if any(
+        request.node.get_closest_marker(marker) is not None
+        for marker in ("live", "live_messaging")
+    ):
+        return
+    monkeypatch.setenv("KLEINANZEIGEN_MESSAGING_DIR", str(tmp_path / "messaging"))
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--run-live",
@@ -47,20 +60,39 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Live-Tests ausführen (benötigt den API-Server und Netzwerkzugriff)",
     )
+    parser.addoption(
+        "--run-live-messaging",
+        action="store_true",
+        default=False,
+        help=(
+            "Nachrichten-Live-Tests zwischen explizit konfigurierten eigenen "
+            "Accounts ausführen (benötigt serverseitigen Nachrichten-Testmodus)"
+        ),
+    )
 
 
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """Live-Tests sind ein explizites Opt-in und standardmäßig übersprungen."""
-    if config.getoption("--run-live"):
-        return
-
+    """Nachrichtenversand hat ein separates, niemals implizites Live-Opt-in."""
     skip_live = pytest.mark.skip(
         reason="Live-Test deaktiviert; mit --run-live explizit aktivieren"
     )
+    skip_messaging = pytest.mark.skip(
+        reason=(
+            "Nachrichten-Live-Test deaktiviert; nur mit --run-live-messaging "
+            "und eigenen Testaccounts aktivieren"
+        )
+    )
     for item in items:
-        if item.get_closest_marker("live") is not None:
+        # Messaging takes precedence even if a test also has the broad live
+        # marker. --run-live must never authorize a message to be sent.
+        if item.get_closest_marker("live_messaging") is not None:
+            if not config.getoption("--run-live-messaging"):
+                item.add_marker(skip_messaging)
+        elif item.get_closest_marker("live") is not None and not config.getoption(
+            "--run-live"
+        ):
             item.add_marker(skip_live)
 
 

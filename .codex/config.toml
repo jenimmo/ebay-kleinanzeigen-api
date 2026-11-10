@@ -4,3 +4,11 @@ args = []
 cwd = "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API"
 startup_timeout_sec = 120
 tool_timeout_sec = 900
+
+[mcp_servers.kleinanzeigen.env]
+KLEINANZEIGEN_API_BASE_URL = "http://127.0.0.1:50489"
+KLEINANZEIGEN_MCP_AUTOSTART = "true"
+KLEINANZEIGEN_MCP_BACKEND_DIRECTORY = "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API"
+KLEINANZEIGEN_MESSAGING_BROWSER_CHANNEL = "safari"
+KLEINANZEIGEN_MESSAGING_DIR = "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/data/messaging"
+KLEINANZEIGEN_MESSAGING_TEST_MODE = "false"

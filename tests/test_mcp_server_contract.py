@@ -27,6 +27,16 @@ EXPECTED_TOOLS = {
     "get_job_results",
     "resume_job",
     "cancel_job",
+    "list_accounts",
+    "connect_account",
+    "disconnect_account",
+    "list_conversations",
+    "get_conversation",
+    "get_message_image",
+    "upload_message_images",
+    "start_conversation",
+    "send_message",
+    "get_message_operation",
 }
 EXPECTED_ANNOTATIONS = {
     # readOnly, destructive, idempotent, openWorld
@@ -38,6 +48,16 @@ EXPECTED_ANNOTATIONS = {
     "get_job_results": (True, False, True, False),
     "resume_job": (False, False, True, True),
     "cancel_job": (False, True, True, False),
+    "list_accounts": (True, False, True, False),
+    "connect_account": (False, False, False, True),
+    "disconnect_account": (False, True, True, False),
+    "list_conversations": (False, False, True, True),
+    "get_conversation": (False, False, True, True),
+    "get_message_image": (True, False, True, False),
+    "upload_message_images": (False, False, False, False),
+    "start_conversation": (False, False, True, True),
+    "send_message": (False, False, True, True),
+    "get_message_operation": (False, False, True, True),
 }
 LARGE_RESULT_TOOLS = {
     "search_listings",
@@ -82,14 +102,16 @@ def mcp_server(fake_client: FakeClient):
 
 
 @pytest.mark.asyncio
-async def test_server_exposes_exactly_the_eight_public_tools(mcp_server: Any) -> None:
+async def test_server_exposes_exactly_the_eighteen_public_tools(
+    mcp_server: Any,
+) -> None:
     async with Client(mcp_server, raise_exceptions=True) as client:
         tools = (await client.list_tools()).tools
         instructions = client.instructions
         server_info = client.server_info
 
     assert {tool.name for tool in tools} == EXPECTED_TOOLS
-    assert len(tools) == 8
+    assert len(tools) == 18
     assert server_info.name == "kleinanzeigen"
     assert server_info.title == "Kleinanzeigen Agent"
     assert server_info.description is not None
@@ -101,6 +123,8 @@ async def test_server_exposes_exactly_the_eight_public_tools(mcp_server: Any) ->
     assert instructions == SERVER_INSTRUCTIONS
     assert "parallelen Suchjobs" in instructions
     assert "next_action" in instructions
+    assert "idempotency_key" in instructions
+    assert "outcome_unknown" in instructions
 
     by_name = {tool.name: tool for tool in tools}
     for tool in tools:
@@ -115,6 +139,10 @@ async def test_server_exposes_exactly_the_eight_public_tools(mcp_server: Any) ->
     assert "paralleler Suchjobs" in by_name["merge_search_results"].description
     assert "timed_out=true" in by_name["get_job_results"].description
     assert "state=needs_attention" in by_name["resume_job"].description
+    for name in ("send_message", "start_conversation"):
+        assert "account_id" in by_name[name].input_schema["required"]
+        assert "idempotency_key" in by_name[name].input_schema["required"]
+    assert "gelesen markieren" in by_name["get_conversation"].description
 
     detail_ids = by_name["get_listing_details"].input_schema["properties"][
         "listing_ids"

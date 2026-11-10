@@ -639,10 +639,14 @@ def test_url_provider_is_cached_until_explicit_refresh(
     assert provider(refresh=True) == "http://127.0.0.1:41002"
 
 
+@pytest.mark.parametrize("browser_channel", ["chrome", "safari"])
 def test_spawn_is_detached_uses_inherited_socket_and_never_mcp_stdout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    browser_channel: str,
 ) -> None:
+    monkeypatch.setenv("KLEINANZEIGEN_MESSAGING_BROWSER_CHANNEL", browser_channel)
+    monkeypatch.delenv("KLEINANZEIGEN_MESSAGING_SAFARI_ENDPOINT", raising=False)
     settings = _settings(tmp_path)
     settings.runtime_dir.mkdir(parents=True)
     captured: dict[str, Any] = {}
@@ -655,6 +659,7 @@ def test_spawn_is_detached_uses_inherited_socket_and_never_mcp_stdout(
     monkeypatch.setattr(backend_launcher.subprocess, "Popen", fake_popen)
     reserved_socket = _FakeSocket()
     inherited_fd = reserved_socket.fileno()
+    reserved_port = reserved_socket.getsockname()[1]
 
     result = BackendLauncher(settings)._spawn_backend(reserved_socket)
 
@@ -679,6 +684,12 @@ def test_spawn_is_detached_uses_inherited_socket_and_never_mcp_stdout(
     assert kwargs["close_fds"] is True
     assert kwargs["pass_fds"] == (inherited_fd,)
     assert kwargs["start_new_session"] is True
+    if browser_channel == "safari":
+        assert kwargs["env"]["KLEINANZEIGEN_MESSAGING_SAFARI_ENDPOINT"] == (
+            f"http://127.0.0.1:{reserved_port}/messaging/safari-bridge/exchange"
+        )
+    else:
+        assert "KLEINANZEIGEN_MESSAGING_SAFARI_ENDPOINT" not in kwargs["env"]
     assert reserved_socket.fileno() == -1
 
 

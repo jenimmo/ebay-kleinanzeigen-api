@@ -335,6 +335,13 @@ class BackendLauncher:
                 self.settings.log_path,
                 self.settings.log_max_bytes,
             )
+            child_env = dict(os.environ)
+            if child_env.get("KLEINANZEIGEN_MESSAGING_BROWSER_CHANNEL") == "safari":
+                address = reserved_socket.getsockname()
+                bridge_host = "[::1]" if ":" in address[0] else "127.0.0.1"
+                child_env["KLEINANZEIGEN_MESSAGING_SAFARI_ENDPOINT"] = (
+                    f"http://{bridge_host}:{address[1]}/messaging/safari-bridge/exchange"
+                )
             process = subprocess.Popen(
                 [
                     sys.executable,
@@ -350,7 +357,7 @@ class BackendLauncher:
                     "warning",
                 ],
                 cwd=self.settings.backend_directory,
-                env=dict(os.environ),
+                env=child_env,
                 stdin=subprocess.DEVNULL,
                 stdout=log_handle,
                 stderr=log_handle,
@@ -789,6 +796,9 @@ def _reserve_socket(host: str, port: int) -> socket.socket:
     family = socket.AF_INET6 if ":" in bind_host else socket.AF_INET
     reserved = socket.socket(family, socket.SOCK_STREAM)
     try:
+        # Reuse only closed connections in TIME_WAIT after a clean restart.
+        # Never enable SO_REUSEPORT: bind/listen must still reserve one listener.
+        reserved.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         reserved.bind((bind_host, port))
         reserved.listen(2048)
     except Exception:

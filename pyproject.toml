@@ -16,6 +16,7 @@ dependencies = [
     "loguru>=0.7.3",
     "mcp>=2.0.0,<3.0.0",
     "playwright>=1.49.0",
+    "pillow>=11.0.0",
     "pydantic>=2.0.0",
     "python-multipart>=0.0.20",
     "uvicorn>=0.34.0",
@@ -43,6 +44,7 @@ pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
     "live: requires a running API server and may access Kleinanzeigen over the network (enable with --run-live)",
+    "live_messaging: sends messages only between configured own accounts with server test mode (enable separately with --run-live-messaging)",
 ]
 
 [tool.setuptools]
@@ -50,6 +52,6 @@ py-modules = ["main"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["kleinanzeigen_mcp*", "libs*", "routers*", "scrapers*", "utils*"]
+include = ["kleinanzeigen_mcp*", "libs*", "messaging*", "routers*", "scrapers*", "utils*"]
 exclude = ["tests*"]
 namespaces = true

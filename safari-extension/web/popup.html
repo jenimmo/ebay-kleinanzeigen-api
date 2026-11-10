@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="de">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Kleinanzeigen verbinden</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <h1>Kleinanzeigen verbinden</h1>
+  <p>Melde dich in diesem Safari-Profil bei deinem Account an und öffne einen Kleinanzeigen-Tab. Die Verbindung prüft deine Nutzer-ID anschließend unter <strong>Meine Anzeigen</strong>.</p>
+  <label for="account">Angeforderter Account</label>
+  <select id="account" disabled></select>
+  <button id="connect" disabled>Diesen Tab verbinden</button>
+  <p id="status" role="status">Verbindung wird geprüft …</p>
+  <p class="note">Die Anmeldung bleibt in Safari. Gesendet wird nur durch einen gesonderten Auftrag an die lokale API.</p>
+  <script src="popup-bootstrap.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

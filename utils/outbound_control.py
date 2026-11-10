@@ -51,13 +51,27 @@ _BLOCK_TEXT_MARKERS = (
     "request blocked",
     "anfrage wurde blockiert",
     "temporarily blocked",
-    "vorübergehend gesperrt",
+    "ip-bereich wurde gesperrt",
+    "ip bereich wurde gesperrt",
+    "ip-bereich ist gesperrt",
+    "ip bereich ist gesperrt",
+    "ip-bereich wurde vorübergehend gesperrt",
+    "ip-bereich vorübergehend gesperrt",
+    "ip bereich vorübergehend gesperrt",
+    "ip-adresse wurde vorübergehend gesperrt",
+    "dein zugang ist vorübergehend gesperrt",
+    "dein zugang wurde vorübergehend gesperrt",
+    "dein konto ist vorübergehend gesperrt",
+    "dein konto wurde vorübergehend gesperrt",
+    "dein nutzerkonto ist vorübergehend gesperrt",
+    "dein nutzerkonto wurde vorübergehend gesperrt",
     "automatisierte anfragen",
     "checking your browser",
     "enable javascript and cookies to continue",
     "press and hold to confirm",
 )
 _BLOCK_TITLE_MARKERS = (
+    "vorübergehend gesperrt",
     "access denied",
     "security check",
     "sicherheitsüberprüfung",
@@ -91,6 +105,11 @@ _EXPECTED_PAGE_SELECTORS = (
     "#viewad-title",
     "#viewad-description-text",
     "#srchrslt-adexpired",
+    "#messagebox",
+    "#messagebox-bundle",
+    '[data-testid="conversation-list"]',
+    "[data-conversation-id]",
+    "[data-message-id]",
 )
 
 
@@ -286,6 +305,7 @@ class _UpstreamSignal:
     retry_after: float | None
     error_type: type[OutboundControlError]
     message: str
+    block_indicator: str | None = None
 
 
 class OutboundController:
@@ -399,6 +419,85 @@ class OutboundController:
             wait_until=wait_until,
         )
         return response
+
+    async def run_interaction(
+        self,
+        operation: Callable[[], Awaitable[_ResultT]],
+        *,
+        timeout_seconds: float = 60,
+        upstream_verified: Callable[[_ResultT], bool] | None = None,
+    ) -> _ResultT:
+        """Admit one non-Playwright browser operation without retrying it.
+
+        Safari's extension performs its own navigation and DOM checks. It still
+        shares concurrency, start spacing, circuit state and accounting with
+        the public browser pool. Local extension polling does not use a permit.
+        """
+        if not callable(operation) or timeout_seconds <= 0:
+            raise ValueError("A callable and positive timeout are required")
+        lease = await self._acquire(is_retry=False, wait_indefinitely=True)
+        succeeded = cancelled = False
+        try:
+            async with self._start_lock:
+                while True:
+                    async with self._lock:
+                        now = self._clock()
+                        self._raise_if_unavailable_locked(
+                            now, probe_generation=lease.probe_generation
+                        )
+                        delay = max(0.0, self._next_start_at - now)
+                    if delay <= 0:
+                        break
+                    await self._sleep(delay)
+                async with self._lock:
+                    self._raise_if_unavailable_locked(
+                        self._clock(), probe_generation=lease.probe_generation
+                    )
+                    self._record_navigation_start_locked(self._clock(), is_retry=False)
+                await self._notify_state_change()
+            async with asyncio.timeout(timeout_seconds):
+                result = await operation()
+            succeeded = True
+            if lease.is_probe:
+                if upstream_verified is not None and upstream_verified(result):
+                    await self._finish_state_change(self._close_after_probe(lease))
+                else:
+                    # A local DOM read is not evidence that a previously
+                    # blocked upstream is reachable again.
+                    await self._finish_state_change(self._abandon_probe(lease))
+            return result
+        except asyncio.CancelledError:
+            cancelled = True
+            if lease.is_probe:
+                await self._finish_state_change(self._abandon_probe(lease))
+            raise
+        except BaseException:
+            if lease.is_probe:
+                await self._finish_state_change(self._reopen_failed_probe(lease))
+            raise
+        finally:
+            await self._release_cancellation_safe(
+                lease, succeeded=succeeded, cancelled=cancelled
+            )
+
+    async def report_interaction_block(
+        self, code: str, *, retry_after: float | None = None
+    ) -> None:
+        """Apply a fixed, verified extension signal to the shared circuit."""
+        if code not in {"upstream_blocked", "upstream_rate_limited"}:
+            raise ValueError("Unsupported upstream signal")
+        limited = code == "upstream_rate_limited"
+        await self._raise_upstream_signal(
+            _UpstreamSignal(
+                reason="http_429" if limited else "block_page",
+                metric="upstream_429" if limited else "block_pages",
+                retry_after=retry_after,
+                error_type=UpstreamRateLimited if limited else UpstreamBlocked,
+                message="Kleinanzeigen restricted the Safari interaction",
+                block_indicator=None if limited else "safari:verified_block",
+            ),
+            lease=_Lease(probe_generation=None),
+        )
 
     async def run_navigation(
         self,
@@ -1217,6 +1316,19 @@ class OutboundController:
             raise pending_cancellation
         return result
 
+    async def inspect_interaction_response(
+        self, page: Any, response: Any = None
+    ) -> None:
+        """Apply the shared circuit to a form/XHR response inside an admitted operation.
+
+        This does not acquire a second permit or retry a form submission. Callers
+        must already hold a navigation lifecycle permit for automated actions.
+        Inspecting an already loaded DOM during manual login is also allowed:
+        it sends no request and must not reserve a permit for human input.
+        """
+        signal = await self._inspect_response(page, response)
+        await self._raise_upstream_signal(signal, lease=_Lease(probe_generation=None))
+
     async def _inspect_response(
         self, page: Any, response: Any
     ) -> _UpstreamSignal | None:
@@ -1241,13 +1353,15 @@ class OutboundController:
                 message="Kleinanzeigen returned HTTP 403",
             )
 
-        if await self._page_has_block_signal(page):
+        block_indicator = await self._page_block_indicator(page)
+        if block_indicator:
             return _UpstreamSignal(
                 reason="block_page",
                 retry_after=retry_after,
                 metric="block_pages",
                 error_type=UpstreamBlocked,
                 message=("Kleinanzeigen returned a captcha, challenge, or block page"),
+                block_indicator=block_indicator,
             )
         return None
 
@@ -1264,10 +1378,13 @@ class OutboundController:
                 lease=lease,
             )
         )
-        raise signal.error_type(
+        error = signal.error_type(
             signal.message,
             retry_after=effective_retry_after,
         )
+        # Fixed policy markers only; never page text, full URLs or form values.
+        error.block_indicator = signal.block_indicator
+        raise error
 
     async def _response_headers(self, response: Any) -> dict[str, str]:
         if response is None:
@@ -1286,22 +1403,25 @@ class OutboundController:
         return {}
 
     async def _page_has_block_signal(self, page: Any) -> bool:
+        return await self._page_block_indicator(page) is not None
+
+    async def _page_block_indicator(self, page: Any) -> str | None:
         page_url = str(getattr(page, "url", "") or "")
         parsed_url = urlsplit(page_url)
         path = parsed_url.path.casefold()
         host = (parsed_url.hostname or "").casefold()
-        if any(
-            host == domain or host.endswith(f".{domain}") for domain in _BLOCK_HOSTS
-        ):
-            return True
-        if any(
-            path == marker or path.startswith(f"{marker}/")
-            for marker in _BLOCK_PATH_MARKERS
-        ):
-            return True
+        for domain in _BLOCK_HOSTS:
+            if host == domain or host.endswith(f".{domain}"):
+                return "host:" + domain
+        for marker in _BLOCK_PATH_MARKERS:
+            if path == marker or path.startswith(f"{marker}/"):
+                return "path:" + marker
 
-        if await self._has_any_selector(page, _BLOCK_DOM_SELECTORS):
-            return True
+        selector = await self._first_matching_selector(
+            page, _BLOCK_DOM_SELECTORS, visible_only=True
+        )
+        if selector is not None:
+            return "visible_selector:" + selector
 
         has_expected_page_structure = await self._has_any_selector(
             page, _EXPECTED_PAGE_SELECTORS
@@ -1333,30 +1453,47 @@ class OutboundController:
                 pass
 
         folded_title = title.casefold()
-        folded_text = visible_text.casefold()
-        has_title_signal = any(
-            marker in folded_title for marker in _BLOCK_TITLE_MARKERS
-        )
-        has_body_signal = any(marker in folded_text for marker in _BLOCK_TEXT_MARKERS)
-
+        folded_text = " ".join(visible_text.casefold().split())
         # User-generated titles and descriptions may legitimately mention words
         # such as "captcha" or "access denied". Only textual challenge signals
         # without recognizable Kleinanzeigen search/detail structure open the
         # process-wide circuit. Status, challenge host/path, and DOM checks above
         # remain authoritative on their own.
-        return not has_expected_page_structure and (has_title_signal or has_body_signal)
+        if not has_expected_page_structure:
+            for marker in _BLOCK_TITLE_MARKERS:
+                if marker in folded_title:
+                    return "title:" + marker
+            for marker in _BLOCK_TEXT_MARKERS:
+                if marker in folded_text:
+                    return "body:" + marker
+        return None
 
     async def _has_any_selector(self, page: Any, selectors: tuple[str, ...]) -> bool:
+        return await self._first_matching_selector(page, selectors) is not None
+
+    async def _first_matching_selector(
+        self, page: Any, selectors: tuple[str, ...], *, visible_only=False
+    ) -> str | None:
         query_selector = getattr(page, "query_selector", None)
         if not callable(query_selector):
-            return False
+            return None
         for selector in selectors:
             try:
-                if await query_selector(selector) is not None:
-                    return True
+                query_all = getattr(page, "query_selector_all", None)
+                if visible_only and callable(query_all):
+                    elements = await query_all(selector)
+                else:
+                    elements = [await query_selector(selector)]
+                for element in elements:
+                    if element is None:
+                        continue
+                    is_visible = getattr(element, "is_visible", None)
+                    if visible_only and callable(is_visible) and not await is_visible():
+                        continue
+                    return selector
             except Exception:
                 continue
-        return False
+        return None
 
     def _parse_retry_after(self, value: str | None) -> float | None:
         if value is None:

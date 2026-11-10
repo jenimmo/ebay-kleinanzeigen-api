@@ -4,7 +4,15 @@
       "type": "stdio",
       "command": "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/.venv/bin/kleinanzeigen-mcp",
       "args": [],
-      "timeout": 900000
+      "timeout": 900000,
+      "env": {
+        "KLEINANZEIGEN_API_BASE_URL": "http://127.0.0.1:50489",
+        "KLEINANZEIGEN_MCP_AUTOSTART": "true",
+        "KLEINANZEIGEN_MCP_BACKEND_DIRECTORY": "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API",
+        "KLEINANZEIGEN_MESSAGING_BROWSER_CHANNEL": "safari",
+        "KLEINANZEIGEN_MESSAGING_DIR": "/Users/matthias/Documents/ChatGPT/Kleinanzeigen API/data/messaging",
+        "KLEINANZEIGEN_MESSAGING_TEST_MODE": "false"
+      }
     }
   }
 }

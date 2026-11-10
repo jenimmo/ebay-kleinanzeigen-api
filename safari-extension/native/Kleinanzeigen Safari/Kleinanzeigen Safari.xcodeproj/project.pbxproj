@@ -1,0 +1,804 @@
+// !$*UTF8*$!
+{
+	"classes" = {
+	};
+	"objectVersion" = "77";
+	"archiveVersion" = "1";
+	"objects" = {
+		"5D6E076DA74BB60D6CD8F76A" = {
+			"path" = "../../assets/KleinanzeigenSafari.icns";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "image.icns";
+		};
+		"D153B1CAE98FA7ED0169DC37" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "5D6E076DA74BB60D6CD8F76A";
+		};
+		"ACD80622ADE977FED0B6E907" = {
+			"path" = "../../assets/web-icons/icon-16.png";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "image.png";
+		};
+		"E2946C93593E5790E909D643" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "ACD80622ADE977FED0B6E907";
+		};
+		"5F671EFBE2A02021C2D47A3D" = {
+			"path" = "../../assets/web-icons/icon-32.png";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "image.png";
+		};
+		"BF6174E0022659763BC1B6A1" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "5F671EFBE2A02021C2D47A3D";
+		};
+		"7833D61BCB88448BF4FBDC8A" = {
+			"path" = "../../assets/web-icons/icon-48.png";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "image.png";
+		};
+		"00BB9D3654BE9B8AACE17BA3" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "7833D61BCB88448BF4FBDC8A";
+		};
+		"A3B4077EC1DC332F6F12BED7" = {
+			"path" = "../../assets/web-icons/icon-128.png";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "image.png";
+		};
+		"87F003EAE0257D88D39CF870" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "A3B4077EC1DC332F6F12BED7";
+		};
+		"2E13932471A671239DB8A98A" = {
+			"path" = "../../assets/web-icons/icon-256.png";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "image.png";
+		};
+		"FAB067B346A3B32DFA4D1CC2" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "2E13932471A671239DB8A98A";
+		};
+		"C0FAFACF57055FC5D5C80F61" = {
+			"path" = "../../assets/web-icons/toolbar-16.png";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "image.png";
+		};
+		"EE0859C3A49A733CC1C57BAF" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "C0FAFACF57055FC5D5C80F61";
+		};
+		"87860414E3AAAA96AB60FE2D" = {
+			"path" = "../../assets/web-icons/toolbar-32.png";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "image.png";
+		};
+		"575747A39A6579585F52843B" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "87860414E3AAAA96AB60FE2D";
+		};
+		"8375B5D03827A8693B5DAD0B" = {
+			"path" = "../../web/messaging-read.js";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "text";
+		};
+		"23ADA6FC013A7935A2A50812" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "8375B5D03827A8693B5DAD0B";
+		};
+		"2C9C29516DECF491CD25B2CE" = {
+			"isa" = "PBXGroup";
+			"name" = "Icon Assets";
+			"sourceTree" = "<group>";
+			"children" = (
+				"5D6E076DA74BB60D6CD8F76A",
+				"ACD80622ADE977FED0B6E907",
+				"5F671EFBE2A02021C2D47A3D",
+				"7833D61BCB88448BF4FBDC8A",
+				"A3B4077EC1DC332F6F12BED7",
+				"2E13932471A671239DB8A98A",
+				"C0FAFACF57055FC5D5C80F61",
+				"87860414E3AAAA96AB60FE2D",
+			);
+		};
+		"D51FF687645B7C4AB9FCFCAD" = {
+			"path" = "../../web/popup.html";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "text";
+		};
+		"393BE699309B7B7D00BCA9E1" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"CLANG_WARN_UNGUARDED_AVAILABILITY" = "YES_AGGRESSIVE";
+				"CLANG_WARN_SUSPICIOUS_MOVE" = "YES";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"CLANG_ENABLE_OBJC_ARC" = "YES";
+				"CLANG_WARN_DIRECT_OBJC_ISA_USAGE" = "YES_ERROR";
+				"CLANG_WARN__DUPLICATE_METHOD_MATCH" = "YES";
+				"CLANG_ENABLE_OBJC_WEAK" = "YES";
+				"SWIFT_COMPILATION_MODE" = "wholemodule";
+				"CLANG_WARN_INFINITE_RECURSION" = "YES";
+				"ENABLE_NS_ASSERTIONS" = "NO";
+				"CLANG_WARN_DOCUMENTATION_COMMENTS" = "YES";
+				"GCC_WARN_UNDECLARED_SELECTOR" = "YES";
+				"CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION" = "YES_AGGRESSIVE";
+				"SDKROOT" = "macosx";
+				"CLANG_CXX_LANGUAGE_STANDARD" = "gnu++20";
+				"LOCALIZATION_PREFERS_STRING_CATALOGS" = "YES";
+				"CLANG_WARN_BOOL_CONVERSION" = "YES";
+				"CLANG_WARN_UNREACHABLE_CODE" = "YES";
+				"ENABLE_STRICT_OBJC_MSGSEND" = "YES";
+				"CLANG_ANALYZER_NONNULL" = "YES";
+				"CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING" = "YES";
+				"CLANG_WARN_STRICT_PROTOTYPES" = "YES";
+				"CLANG_WARN_ENUM_CONVERSION" = "YES";
+				"GCC_WARN_64_TO_32_BIT_CONVERSION" = "YES";
+				"CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER" = "YES";
+				"GCC_WARN_UNINITIALIZED_AUTOS" = "YES_AGGRESSIVE";
+				"ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS" = "YES";
+				"GCC_WARN_ABOUT_RETURN_TYPE" = "YES_ERROR";
+				"CLANG_WARN_EMPTY_BODY" = "YES";
+				"CLANG_WARN_COMMA" = "YES";
+				"GCC_WARN_UNUSED_VARIABLE" = "YES";
+				"GCC_C_LANGUAGE_STANDARD" = "gnu17";
+				"CLANG_WARN_RANGE_LOOP_ANALYSIS" = "YES";
+				"CLANG_ENABLE_MODULES" = "YES";
+				"CLANG_WARN_INT_CONVERSION" = "YES";
+				"ALWAYS_SEARCH_USER_PATHS" = "NO";
+				"CLANG_WARN_OBJC_ROOT_CLASS" = "YES_ERROR";
+				"CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS" = "YES";
+				"COPY_PHASE_STRIP" = "NO";
+				"CLANG_WARN_CONSTANT_CONVERSION" = "YES";
+				"ENABLE_USER_SCRIPT_SANDBOXING" = "YES";
+				"GCC_NO_COMMON_BLOCKS" = "YES";
+				"MTL_ENABLE_DEBUG_INFO" = "NO";
+				"CLANG_WARN_NON_LITERAL_NULL_CONVERSION" = "YES";
+				"MTL_FAST_MATH" = "YES";
+				"GCC_WARN_UNUSED_FUNCTION" = "YES";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
+				"CLANG_WARN_OBJC_LITERAL_CONVERSION" = "YES";
+				"CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF" = "YES";
+			};
+			"name" = "Release";
+		};
+		"393BE69C309B7B7D00BCA9E1" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"CODE_SIGN_ENTITLEMENTS" = "Kleinanzeigen Safari Extension/Extension.entitlements";
+				"MARKETING_VERSION" = "1.0.16";
+				"GENERATE_INFOPLIST_FILE" = "YES";
+				"DEVELOPMENT_TEAM" = "EUXB3Z2QNQ";
+				"REGISTER_APP_GROUPS" = "NO";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "de.matthias.kleinanzeigen.safari.Extension";
+				"CURRENT_PROJECT_VERSION" = "24";
+				"STRING_CATALOG_GENERATE_SYMBOLS" = "YES";
+				"INFOPLIST_KEY_CFBundleDisplayName" = "Kleinanzeigen Safari Extension";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"OTHER_CODE_SIGN_FLAGS" = "--timestamp";
+				"OTHER_LDFLAGS" = (
+					"-framework",
+					"SafariServices",
+				);
+				"CODE_SIGN_STYLE" = "Automatic";
+				"LD_RUNPATH_SEARCH_PATHS" = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				"SWIFT_VERSION" = "5.0";
+				"PRODUCT_NAME" = "$(TARGET_NAME)";
+				"SWIFT_APPROACHABLE_CONCURRENCY" = "NO";
+				"SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY" = "YES";
+				"INFOPLIST_KEY_NSHumanReadableCopyright" = "";
+				"SKIP_INSTALL" = "YES";
+				"ENABLE_OUTGOING_NETWORK_CONNECTIONS" = "YES";
+				"ENABLE_APP_SANDBOX" = "YES";
+				"CODE_SIGN_IDENTITY" = "Apple Development";
+				"SWIFT_EMIT_LOC_STRINGS" = "YES";
+				"ENABLE_HARDENED_RUNTIME" = "YES";
+				"INFOPLIST_FILE" = "Kleinanzeigen Safari Extension/Info.plist";
+			};
+			"name" = "Release";
+		};
+		"6240D1AD15EE9404B471AFB6" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "9AB49515B6CF0F356A03891D";
+		};
+		"393BE68C309B7B7D00BCA9E1" = {
+			"isa" = "PBXSourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+				"393BE696309B7B7D00BCA9E1",
+				"A8C5FC02562E858C1677403A",
+				"DBDEEDF138C3C604665D67C8",
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"393BE673309B7B7C00BCA9E1" = {
+			"isa" = "PBXResourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+				"D153B1CAE98FA7ED0169DC37",
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"DBDEEDF138C3C604665D67C8" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "847D65BA2FE60687A7EB0AFF";
+		};
+		"5AF97DA61BF2A35317CF835E" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "C22E7F0689B2ED996420E753";
+		};
+		"393BE66D309B7B7C00BCA9E1" = {
+			"buildConfigurationList" = "393BE670309B7B7C00BCA9E1";
+			"targets" = (
+				"393BE674309B7B7C00BCA9E1",
+				"393BE68F309B7B7D00BCA9E1",
+			);
+			"minimizedProjectReferenceProxies" = "1";
+			"developmentRegion" = "en";
+			"knownRegions" = (
+				"en",
+				"Base",
+			);
+			"isa" = "PBXProject";
+			"productRefGroup" = "393BE676309B7B7C00BCA9E1";
+			"projectDirPath" = "";
+			"attributes" = {
+				"LastSwiftUpdateCheck" = "2660";
+				"BuildIndependentTargetsInParallel" = "1";
+				"LastUpgradeCheck" = "2660";
+				"TargetAttributes" = {
+					"393BE68F309B7B7D00BCA9E1" = {
+						"CreatedOnToolsVersion" = "26.6";
+					};
+					"393BE674309B7B7C00BCA9E1" = {
+						"CreatedOnToolsVersion" = "26.6";
+					};
+				};
+			};
+			"hasScannedForEncodings" = "0";
+			"projectRoot" = "";
+			"preferredProjectObjectVersion" = "77";
+			"mainGroup" = "393BE66C309B7B7C00BCA9E1";
+		};
+		"393BE696309B7B7D00BCA9E1" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "393BE695309B7B7D00BCA9E1";
+		};
+		"847D65BA2FE60687A7EB0AFF" = {
+			"path" = "Kleinanzeigen Safari Extension/BridgeExchange.swift";
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"393BE670309B7B7C00BCA9E1" = {
+			"isa" = "XCConfigurationList";
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+			"buildConfigurations" = (
+				"393BE698309B7B7D00BCA9E1",
+				"393BE699309B7B7D00BCA9E1",
+			);
+		};
+		"95FC2D99A8BD51A3C0279BB3" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "437815E68057B3A69F84CB9E";
+		};
+		"9AB49515B6CF0F356A03891D" = {
+			"path" = "../../web/popup.css";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "text";
+		};
+		"393BE693309B7B7D00BCA9E1" = {
+			"isa" = "PBXTargetDependency";
+			"target" = "393BE68F309B7B7D00BCA9E1";
+			"targetProxy" = "393BE692309B7B7D00BCA9E1";
+		};
+		"393BE677309B7B7C00BCA9E1" = {
+			"path" = "Kleinanzeigen Safari";
+			"isa" = "PBXGroup";
+			"children" = (
+				"393BE678309B7B7C00BCA9E1",
+				"393BE68B309B7B7D00BCA9E1",
+			);
+			"sourceTree" = "<group>";
+		};
+		"BE7376A34890BE78ACFCFC77" = {
+			"path" = "../../web/popup.js";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "text";
+		};
+		"393BE68D309B7B7D00BCA9E1" = {
+			"isa" = "PBXFrameworksBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"393BE69D309B7B7D00BCA9E1" = {
+			"buildActionMask" = "2147483647";
+			"dstSubfolderSpec" = "13";
+			"isa" = "PBXCopyFilesBuildPhase";
+			"runOnlyForDeploymentPostprocessing" = "0";
+			"dstPath" = "";
+			"files" = (
+				"393BE691309B7B7D00BCA9E1",
+			);
+			"name" = "Embed Foundation Extensions";
+		};
+		"004AE84CA5FEAC570EB3A1BC" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "BE7376A34890BE78ACFCFC77";
+		};
+		"393BE690309B7B7D00BCA9E1" = {
+			"path" = "Kleinanzeigen Safari Extension.appex";
+			"isa" = "PBXFileReference";
+			"includeInIndex" = "0";
+			"explicitFileType" = "wrapper.app-extension";
+			"sourceTree" = "BUILT_PRODUCTS_DIR";
+		};
+		"C1E2FD8A4F626532746DC980" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "BF032DC90D0D84B865071EAD";
+		};
+		"393BE674309B7B7C00BCA9E1" = {
+			"productType" = "com.apple.product-type.application";
+			"productReference" = "393BE675309B7B7C00BCA9E1";
+			"buildConfigurationList" = "393BE69E309B7B7D00BCA9E1";
+			"packageProductDependencies" = (
+			);
+			"productName" = "Kleinanzeigen Safari";
+			"isa" = "PBXNativeTarget";
+			"buildPhases" = (
+				"393BE671309B7B7C00BCA9E1",
+				"393BE672309B7B7C00BCA9E1",
+				"393BE673309B7B7C00BCA9E1",
+				"393BE69D309B7B7D00BCA9E1",
+			);
+			"dependencies" = (
+				"393BE693309B7B7D00BCA9E1",
+			);
+			"name" = "Kleinanzeigen Safari";
+			"buildRules" = (
+			);
+		};
+		"C22E7F0689B2ED996420E753" = {
+			"path" = "../../web/background.js";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "text";
+		};
+		"E207315A831BA97C9A3F2F60" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "270A228A64C3423F04DA9966";
+		};
+		"393BE697309B7B7D00BCA9E1" = {
+			"path" = "Info.plist";
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "text.plist.xml";
+			"sourceTree" = "<group>";
+		};
+		"393BE69A309B7B7D00BCA9E1" = {
+			"isa" = "XCConfigurationList";
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+			"buildConfigurations" = (
+				"393BE69B309B7B7D00BCA9E1",
+				"393BE69C309B7B7D00BCA9E1",
+			);
+		};
+		"90E4302AB93811C6E21E0769" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "D51FF687645B7C4AB9FCFCAD";
+		};
+		"393BE671309B7B7C00BCA9E1" = {
+			"isa" = "PBXSourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+				"393BE679309B7B7C00BCA9E1",
+				"E207315A831BA97C9A3F2F60",
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"393BE6A0309B7B7D00BCA9E1" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"CODE_SIGN_ENTITLEMENTS" = "Kleinanzeigen Safari/Host.entitlements";
+				"MARKETING_VERSION" = "1.0.16";
+				"COMBINE_HIDPI_IMAGES" = "YES";
+				"DEVELOPMENT_TEAM" = "EUXB3Z2QNQ";
+				"SWIFT_EMIT_LOC_STRINGS" = "YES";
+				"CURRENT_PROJECT_VERSION" = "24";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "de.matthias.kleinanzeigen.safari";
+				"REGISTER_APP_GROUPS" = "NO";
+				"STRING_CATALOG_GENERATE_SYMBOLS" = "YES";
+				"INFOPLIST_KEY_NSPrincipalClass" = "NSApplication";
+				"INFOPLIST_KEY_CFBundleDisplayName" = "Kleinanzeigen Safari";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"OTHER_CODE_SIGN_FLAGS" = "--timestamp";
+				"OTHER_LDFLAGS" = (
+					"-framework",
+					"SafariServices",
+				);
+				"CODE_SIGN_STYLE" = "Automatic";
+				"LD_RUNPATH_SEARCH_PATHS" = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				"SWIFT_VERSION" = "5.0";
+				"PRODUCT_NAME" = "$(TARGET_NAME)";
+				"SWIFT_APPROACHABLE_CONCURRENCY" = "NO";
+				"SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY" = "YES";
+				"INFOPLIST_KEY_NSHumanReadableCopyright" = "";
+				"CODE_SIGN_IDENTITY" = "Apple Development";
+				"ENABLE_APP_SANDBOX" = "YES";
+				"ENABLE_HARDENED_RUNTIME" = "YES";
+				"ENABLE_USER_SELECTED_FILES" = "readonly";
+				"INFOPLIST_FILE" = "Kleinanzeigen Safari/Info.plist";
+				"GENERATE_INFOPLIST_FILE" = "YES";
+			};
+			"name" = "Release";
+		};
+		"345AF8B0914B2C607DAADEA6" = {
+			"path" = "../../web/protocol.js";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "text";
+		};
+		"E3E08AF39EA54CB64CDCF651" = {
+			"path" = "../../web/manifest.json";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "text";
+		};
+		"270A228A64C3423F04DA9966" = {
+			"path" = "Shared/BridgeConfiguration.swift";
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"393BE694309B7B7D00BCA9E1" = {
+			"path" = "Kleinanzeigen Safari Extension";
+			"isa" = "PBXGroup";
+			"children" = (
+				"393BE6A1309B7B7D00BCA9E1",
+				"393BE695309B7B7D00BCA9E1",
+				"393BE697309B7B7D00BCA9E1",
+			);
+			"sourceTree" = "<group>";
+		};
+		"393BE678309B7B7C00BCA9E1" = {
+			"path" = "AppDelegate.swift";
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"sourceTree" = "<group>";
+		};
+		"393BE68E309B7B7D00BCA9E1" = {
+			"isa" = "PBXResourcesBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+				"E2946C93593E5790E909D643",
+				"BF6174E0022659763BC1B6A1",
+				"00BB9D3654BE9B8AACE17BA3",
+				"87F003EAE0257D88D39CF870",
+				"FAB067B346A3B32DFA4D1CC2",
+				"EE0859C3A49A733CC1C57BAF",
+				"575747A39A6579585F52843B",
+				"23ADA6FC013A7935A2A50812",
+				"B9A74D5EA233B8350960324F",
+				"15F75CE9807270A8168DCEF8",
+				"5AF97DA61BF2A35317CF835E",
+				"95FC2D99A8BD51A3C0279BB3",
+				"90E4302AB93811C6E21E0769",
+				"004AE84CA5FEAC570EB3A1BC",
+				"6240D1AD15EE9404B471AFB6",
+				"C1E2FD8A4F626532746DC980",
+				"047998929BBF4DE90E36E17D",
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"437815E68057B3A69F84CB9E" = {
+			"path" = "../../web/content.js";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "text";
+		};
+		"393BE69E309B7B7D00BCA9E1" = {
+			"isa" = "XCConfigurationList";
+			"defaultConfigurationIsVisible" = "0";
+			"defaultConfigurationName" = "Release";
+			"buildConfigurations" = (
+				"393BE69F309B7B7D00BCA9E1",
+				"393BE6A0309B7B7D00BCA9E1",
+			);
+		};
+		"393BE691309B7B7D00BCA9E1" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "393BE690309B7B7D00BCA9E1";
+			"settings" = {
+				"ATTRIBUTES" = (
+					"RemoveHeadersOnCopy",
+				);
+			};
+		};
+		"393BE675309B7B7C00BCA9E1" = {
+			"path" = "Kleinanzeigen Safari.app";
+			"isa" = "PBXFileReference";
+			"includeInIndex" = "0";
+			"explicitFileType" = "wrapper.application";
+			"sourceTree" = "BUILT_PRODUCTS_DIR";
+		};
+		"BF032DC90D0D84B865071EAD" = {
+			"path" = "../../web/popup-bootstrap.js";
+			"isa" = "PBXFileReference";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "text";
+		};
+		"393BE68B309B7B7D00BCA9E1" = {
+			"path" = "Info.plist";
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "text.plist.xml";
+			"sourceTree" = "<group>";
+		};
+		"393BE69B309B7B7D00BCA9E1" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"CODE_SIGN_ENTITLEMENTS" = "Kleinanzeigen Safari Extension/Extension.entitlements";
+				"MARKETING_VERSION" = "1.0.16";
+				"GENERATE_INFOPLIST_FILE" = "YES";
+				"DEVELOPMENT_TEAM" = "EUXB3Z2QNQ";
+				"REGISTER_APP_GROUPS" = "NO";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "de.matthias.kleinanzeigen.safari.Extension";
+				"CURRENT_PROJECT_VERSION" = "24";
+				"STRING_CATALOG_GENERATE_SYMBOLS" = "YES";
+				"INFOPLIST_KEY_CFBundleDisplayName" = "Kleinanzeigen Safari Extension";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"OTHER_CODE_SIGN_FLAGS" = "--timestamp";
+				"OTHER_LDFLAGS" = (
+					"-framework",
+					"SafariServices",
+				);
+				"CODE_SIGN_STYLE" = "Automatic";
+				"LD_RUNPATH_SEARCH_PATHS" = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				"SWIFT_VERSION" = "5.0";
+				"PRODUCT_NAME" = "$(TARGET_NAME)";
+				"SWIFT_APPROACHABLE_CONCURRENCY" = "NO";
+				"SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY" = "YES";
+				"INFOPLIST_KEY_NSHumanReadableCopyright" = "";
+				"SKIP_INSTALL" = "YES";
+				"ENABLE_OUTGOING_NETWORK_CONNECTIONS" = "YES";
+				"ENABLE_APP_SANDBOX" = "YES";
+				"CODE_SIGN_IDENTITY" = "Apple Development";
+				"SWIFT_EMIT_LOC_STRINGS" = "YES";
+				"ENABLE_HARDENED_RUNTIME" = "YES";
+				"INFOPLIST_FILE" = "Kleinanzeigen Safari Extension/Info.plist";
+			};
+			"name" = "Debug";
+		};
+		"393BE698309B7B7D00BCA9E1" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"CLANG_WARN_RANGE_LOOP_ANALYSIS" = "YES";
+				"ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS" = "YES";
+				"SWIFT_OPTIMIZATION_LEVEL" = "-Onone";
+				"CLANG_WARN_INFINITE_RECURSION" = "YES";
+				"ONLY_ACTIVE_ARCH" = "YES";
+				"GCC_WARN_UNUSED_VARIABLE" = "YES";
+				"CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING" = "YES";
+				"CLANG_WARN_UNGUARDED_AVAILABILITY" = "YES_AGGRESSIVE";
+				"COPY_PHASE_STRIP" = "NO";
+				"CLANG_WARN_BOOL_CONVERSION" = "YES";
+				"CLANG_WARN_ENUM_CONVERSION" = "YES";
+				"CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS" = "YES";
+				"CLANG_WARN_COMMA" = "YES";
+				"SWIFT_ACTIVE_COMPILATION_CONDITIONS" = "DEBUG $(inherited)";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"CLANG_WARN_INT_CONVERSION" = "YES";
+				"ENABLE_STRICT_OBJC_MSGSEND" = "YES";
+				"CLANG_WARN_SUSPICIOUS_MOVE" = "YES";
+				"CLANG_WARN_EMPTY_BODY" = "YES";
+				"SDKROOT" = "macosx";
+				"CLANG_WARN_DOCUMENTATION_COMMENTS" = "YES";
+				"MTL_ENABLE_DEBUG_INFO" = "INCLUDE_SOURCE";
+				"MTL_FAST_MATH" = "YES";
+				"CLANG_ENABLE_OBJC_ARC" = "YES";
+				"GCC_WARN_UNINITIALIZED_AUTOS" = "YES_AGGRESSIVE";
+				"GCC_C_LANGUAGE_STANDARD" = "gnu17";
+				"CLANG_ENABLE_MODULES" = "YES";
+				"ALWAYS_SEARCH_USER_PATHS" = "NO";
+				"ENABLE_TESTABILITY" = "YES";
+				"CLANG_WARN_DIRECT_OBJC_ISA_USAGE" = "YES_ERROR";
+				"CLANG_WARN_CONSTANT_CONVERSION" = "YES";
+				"GCC_NO_COMMON_BLOCKS" = "YES";
+				"CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF" = "YES";
+				"CLANG_WARN_OBJC_ROOT_CLASS" = "YES_ERROR";
+				"LOCALIZATION_PREFERS_STRING_CATALOGS" = "YES";
+				"CLANG_CXX_LANGUAGE_STANDARD" = "gnu++20";
+				"GCC_WARN_64_TO_32_BIT_CONVERSION" = "YES";
+				"CLANG_WARN__DUPLICATE_METHOD_MATCH" = "YES";
+				"GCC_DYNAMIC_NO_PIC" = "NO";
+				"DEBUG_INFORMATION_FORMAT" = "dwarf";
+				"GCC_WARN_UNDECLARED_SELECTOR" = "YES";
+				"CLANG_ANALYZER_NONNULL" = "YES";
+				"CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION" = "YES_AGGRESSIVE";
+				"CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER" = "YES";
+				"CLANG_ENABLE_OBJC_WEAK" = "YES";
+				"CLANG_WARN_STRICT_PROTOTYPES" = "YES";
+				"GCC_OPTIMIZATION_LEVEL" = "0";
+				"ENABLE_USER_SCRIPT_SANDBOXING" = "YES";
+				"GCC_WARN_ABOUT_RETURN_TYPE" = "YES_ERROR";
+				"GCC_WARN_UNUSED_FUNCTION" = "YES";
+				"CLANG_WARN_UNREACHABLE_CODE" = "YES";
+				"CLANG_WARN_NON_LITERAL_NULL_CONVERSION" = "YES";
+				"GCC_PREPROCESSOR_DEFINITIONS" = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				"CLANG_WARN_OBJC_LITERAL_CONVERSION" = "YES";
+			};
+			"name" = "Debug";
+		};
+		"393BE6A1309B7B7D00BCA9E1" = {
+			"path" = "Kleinanzeigen Safari Extension";
+			"isa" = "PBXGroup";
+			"name" = "Resources";
+			"children" = (
+				"8375B5D03827A8693B5DAD0B",
+				"E3E08AF39EA54CB64CDCF651",
+				"345AF8B0914B2C607DAADEA6",
+				"C22E7F0689B2ED996420E753",
+				"437815E68057B3A69F84CB9E",
+				"D51FF687645B7C4AB9FCFCAD",
+				"BE7376A34890BE78ACFCFC77",
+				"9AB49515B6CF0F356A03891D",
+				"BF032DC90D0D84B865071EAD",
+				"5171B03B5EBE3E260E0AB9B6",
+			);
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"393BE672309B7B7C00BCA9E1" = {
+			"isa" = "PBXFrameworksBuildPhase";
+			"buildActionMask" = "2147483647";
+			"files" = (
+			);
+			"runOnlyForDeploymentPostprocessing" = "0";
+		};
+		"393BE695309B7B7D00BCA9E1" = {
+			"path" = "SafariWebExtensionHandler.swift";
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"sourceTree" = "<group>";
+		};
+		"393BE66C309B7B7C00BCA9E1" = {
+			"isa" = "PBXGroup";
+			"sourceTree" = "<group>";
+			"children" = (
+				"2C9C29516DECF491CD25B2CE",
+				"393BE677309B7B7C00BCA9E1",
+				"393BE694309B7B7D00BCA9E1",
+				"393BE676309B7B7C00BCA9E1",
+				"270A228A64C3423F04DA9966",
+				"847D65BA2FE60687A7EB0AFF",
+			);
+		};
+		"393BE679309B7B7C00BCA9E1" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "393BE678309B7B7C00BCA9E1";
+		};
+		"A8C5FC02562E858C1677403A" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "270A228A64C3423F04DA9966";
+		};
+		"15F75CE9807270A8168DCEF8" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "345AF8B0914B2C607DAADEA6";
+		};
+		"B9A74D5EA233B8350960324F" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "E3E08AF39EA54CB64CDCF651";
+		};
+		"393BE68F309B7B7D00BCA9E1" = {
+			"productType" = "com.apple.product-type.app-extension";
+			"productReference" = "393BE690309B7B7D00BCA9E1";
+			"buildConfigurationList" = "393BE69A309B7B7D00BCA9E1";
+			"packageProductDependencies" = (
+			);
+			"productName" = "Kleinanzeigen Safari Extension";
+			"isa" = "PBXNativeTarget";
+			"buildPhases" = (
+				"393BE68C309B7B7D00BCA9E1",
+				"393BE68D309B7B7D00BCA9E1",
+				"393BE68E309B7B7D00BCA9E1",
+			);
+			"dependencies" = (
+			);
+			"name" = "Kleinanzeigen Safari Extension";
+			"buildRules" = (
+			);
+		};
+		"393BE69F309B7B7D00BCA9E1" = {
+			"isa" = "XCBuildConfiguration";
+			"buildSettings" = {
+				"CODE_SIGN_ENTITLEMENTS" = "Kleinanzeigen Safari/Host.entitlements";
+				"MARKETING_VERSION" = "1.0.16";
+				"COMBINE_HIDPI_IMAGES" = "YES";
+				"DEVELOPMENT_TEAM" = "EUXB3Z2QNQ";
+				"SWIFT_EMIT_LOC_STRINGS" = "YES";
+				"CURRENT_PROJECT_VERSION" = "24";
+				"PRODUCT_BUNDLE_IDENTIFIER" = "de.matthias.kleinanzeigen.safari";
+				"REGISTER_APP_GROUPS" = "NO";
+				"STRING_CATALOG_GENERATE_SYMBOLS" = "YES";
+				"INFOPLIST_KEY_NSPrincipalClass" = "NSApplication";
+				"INFOPLIST_KEY_CFBundleDisplayName" = "Kleinanzeigen Safari";
+				"MACOSX_DEPLOYMENT_TARGET" = "14.0";
+				"OTHER_CODE_SIGN_FLAGS" = "--timestamp";
+				"OTHER_LDFLAGS" = (
+					"-framework",
+					"SafariServices",
+				);
+				"CODE_SIGN_STYLE" = "Automatic";
+				"LD_RUNPATH_SEARCH_PATHS" = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				"SWIFT_VERSION" = "5.0";
+				"PRODUCT_NAME" = "$(TARGET_NAME)";
+				"SWIFT_APPROACHABLE_CONCURRENCY" = "NO";
+				"SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY" = "YES";
+				"INFOPLIST_KEY_NSHumanReadableCopyright" = "";
+				"CODE_SIGN_IDENTITY" = "Apple Development";
+				"ENABLE_APP_SANDBOX" = "YES";
+				"ENABLE_HARDENED_RUNTIME" = "YES";
+				"ENABLE_USER_SELECTED_FILES" = "readonly";
+				"INFOPLIST_FILE" = "Kleinanzeigen Safari/Info.plist";
+				"GENERATE_INFOPLIST_FILE" = "YES";
+			};
+			"name" = "Debug";
+		};
+		"393BE692309B7B7D00BCA9E1" = {
+			"isa" = "PBXContainerItemProxy";
+			"containerPortal" = "393BE66D309B7B7C00BCA9E1";
+			"remoteGlobalIDString" = "393BE68F309B7B7D00BCA9E1";
+			"remoteInfo" = "Kleinanzeigen Safari Extension";
+			"proxyType" = "1";
+		};
+		"393BE676309B7B7C00BCA9E1" = {
+			"isa" = "PBXGroup";
+			"name" = "Products";
+			"children" = (
+				"393BE675309B7B7C00BCA9E1",
+				"393BE690309B7B7D00BCA9E1",
+			);
+			"sourceTree" = "<group>";
+		};
+		"5171B03B5EBE3E260E0AB9B6" = {
+			"isa" = "PBXFileReference";
+			"path" = "../../web/content-bootstrap.js";
+			"sourceTree" = "SOURCE_ROOT";
+			"lastKnownFileType" = "text";
+		};
+		"047998929BBF4DE90E36E17D" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "5171B03B5EBE3E260E0AB9B6";
+		};
+	};
+	"rootObject" = "393BE66D309B7B7C00BCA9E1";
+}

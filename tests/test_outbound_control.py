@@ -13,6 +13,8 @@ from email.utils import format_datetime
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -1185,6 +1187,9 @@ async def test_http_403_is_not_treated_as_an_empty_success() -> None:
     [
         ("Security check", "Please verify you are human", None),
         ("Kleinanzeigen", "Ich bin kein Roboter", None),
+        ("Kleinanzeigen", "Dieser IP-Bereich wurde gesperrt.", None),
+        ("Kleinanzeigen", "Der IP Bereich\n wurde gesperrt.", None),
+        ("Kleinanzeigen", "Dein IP-Bereich ist gesperrt.", None),
         ("Kleinanzeigen", "", "https://www.kleinanzeigen.de/challenge/start"),
     ],
 )
@@ -1225,7 +1230,15 @@ async def test_legitimate_empty_search_page_remains_a_success() -> None:
     await controller.close()
 
 
-@pytest.mark.parametrize("expected_selector", [".ad-listitem", "#viewad-title"])
+@pytest.mark.parametrize(
+    "expected_selector",
+    [
+        ".ad-listitem",
+        "#viewad-title",
+        "#messagebox-bundle",
+        '[data-testid="conversation-list"]',
+    ],
+)
 async def test_expected_kleinanzeigen_dom_allows_user_generated_block_words(
     expected_selector: str,
 ) -> None:
@@ -1236,6 +1249,7 @@ async def test_expected_kleinanzeigen_dom_allows_user_generated_block_words(
         body=(
             "Im Anzeigentext beschreibt der Nutzer ein Captcha und die Meldung "
             "Zugriff verweigert."
+            " Im Chat steht außerdem: Mein IP-Bereich wurde gesperrt."
         ),
         selectors={expected_selector},
     )
@@ -1676,6 +1690,84 @@ def test_invalid_environment_values_fail_clearly(
         OutboundSettings.from_env({environment_name: value})
 
     assert setting_name.casefold() in str(caught.value).casefold()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Meine Anzeigen: Diese Anzeige ist vorübergehend gesperrt.",
+        "Eine Auszahlung ist vorübergehend gesperrt.",
+    ],
+)
+async def test_generic_restriction_text_does_not_claim_account_access_block(text):
+    controller = OutboundController(make_settings())
+    assert not await controller._page_has_block_signal(FakePage(body=text))
+    await controller.close()
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Dieser IP-Bereich wurde vorübergehend gesperrt.",
+        "IP-Bereich vorübergehend gesperrt.",
+        "Dein Konto wurde vorübergehend gesperrt.",
+        "Dein Nutzerkonto ist vorübergehend gesperrt.",
+        "Dein Zugang ist vorübergehend gesperrt.",
+    ],
+)
+async def test_explicit_access_restrictions_still_block(text):
+    controller = OutboundController(make_settings())
+    assert await controller._page_has_block_signal(FakePage(body=text))
+    await controller.close()
+
+
+async def test_block_page_title_alone_still_blocks():
+    controller = OutboundController(make_settings())
+    assert await controller._page_has_block_signal(
+        FakePage(title="Vorübergehend gesperrt")
+    )
+    await controller.close()
+
+
+async def test_hidden_captcha_widget_does_not_block_normal_page():
+    controller = OutboundController(make_settings())
+    page = FakePage(selectors={"#messagebox-bundle"})
+    hidden = SimpleNamespace(is_visible=AsyncMock(return_value=False))
+    page.query_selector_all = AsyncMock(
+        side_effect=lambda selector: (
+            [hidden] if selector == 'iframe[src*="captcha"]' else []
+        )
+    )
+    assert not await controller._page_has_block_signal(page)
+    await controller.close()
+
+
+async def test_visible_captcha_after_hidden_widget_still_blocks_with_safe_indicator():
+    controller = OutboundController(make_settings())
+    page = FakePage(selectors={"#messagebox-bundle"}, body="private-message-secret")
+    hidden = SimpleNamespace(is_visible=AsyncMock(return_value=False))
+    visible = SimpleNamespace(is_visible=AsyncMock(return_value=True))
+    page.query_selector_all = AsyncMock(
+        side_effect=lambda selector: (
+            [hidden, visible] if selector == 'iframe[src*="captcha"]' else []
+        )
+    )
+    with pytest.raises(UpstreamBlocked) as caught:
+        await controller.inspect_interaction_response(page)
+    assert caught.value.block_indicator == 'visible_selector:iframe[src*="captcha"]'
+    assert "secret" not in caught.value.block_indicator
+    assert (await controller.status())["circuit"]["state"] == "open"
+    await controller.close()
+
+
+async def test_block_text_indicator_never_contains_page_content():
+    controller = OutboundController(make_settings())
+    page = FakePage(body="Dieser IP-Bereich wurde gesperrt. private-session-secret")
+    with pytest.raises(UpstreamBlocked) as caught:
+        await controller.inspect_interaction_response(page)
+    assert caught.value.block_indicator == "body:ip-bereich wurde gesperrt"
+    assert "secret" not in caught.value.block_indicator
+    await controller.close()
 
 
 def test_production_goto_calls_exist_only_in_outbound_controller() -> None:
