@@ -51,7 +51,16 @@ from utils.asyncio_optimizations import (
 
 _KLEINANZEIGEN_TIMEZONE = ZoneInfo("Europe/Berlin")
 _logger = logging.getLogger(__name__)
-_BREADCRUMB_SELECTOR = ".breadcrump-summary"
+_SEARCH_CARD_SELECTOR = (
+    "#srchrslt-adtable article[data-adid], .ad-listitem article[data-adid]"
+)
+_BREADCRUMB_SELECTOR = "#srp-breadcrumb-summary, .breadcrump-summary"
+_EMPTY_RESULT_SELECTOR = "#saved-search-empty-result"
+_NEXT_PAGE_SELECTOR = (
+    '#pagination-container a[aria-label="Nächste"][href], '
+    'a[rel="next"][href], .pagination-next:not(.is-disabled) a[href]'
+)
+_SEARCH_RENDER_GRACE_SECONDS = 3.0
 _PAGE_SEGMENT_PATTERN = re.compile(r"^(?:s-)?seite:\d+$")
 _CATEGORY_FILTER_PATTERN = re.compile(r"^(?:k\d+)?c\d+")
 _KEYWORD_FILTER_PATTERN = re.compile(r"^k\d+")
@@ -79,7 +88,20 @@ def _parse_breadcrumb_summary(
 ) -> tuple[int | None, int | None, int | None]:
     """Return ``(total_results, total_pages, page_size)`` from page 1."""
 
-    match = re.search(r"(\d[\d.]*)\s*-\s*(\d[\d.]*)\s+von\s+([\d.]+)", text)
+    # Only the site's summary prefix reports the count. The search term itself
+    # may contain '0 Treffer' or even a string that looks like a result range.
+    empty = re.match(
+        r"\s*(?:0\s+(?:anzeigen|ergebnisse|treffer)\b"
+        r"|es wurden (?:leider )?keine ergebnisse\b)",
+        text.casefold(),
+    )
+    if empty:
+        return 0, 0, None
+
+    match = re.search(
+        r"(\d[\d.]*)\s*[–-]\s*(\d[\d.]*)\s+von\s+(\d[\d.]*)",
+        text.partition("„")[0],
+    )
     if match:
         page_start = int(match.group(1).replace(".", ""))
         page_end = int(match.group(2).replace(".", ""))
@@ -89,9 +111,6 @@ def _parse_breadcrumb_summary(
             return total, None, None
         return total, math.ceil(total / page_size) if total else 0, page_size
 
-    empty = re.search(r"\b0\s+(?:anzeigen|ergebnisse|treffer)\b", text.casefold())
-    if empty:
-        return 0, 0, None
     return None, None, None
 
 
@@ -148,6 +167,17 @@ def _inject_search_page(url: str, page_number: int) -> str:
             segments = [f"s-{keyword}", segments[1]]
         else:
             segments = [f"s-seite:{page_number}", keyword, segments[1]]
+        return urlunparse(parsed._replace(path="/" + "/".join(segments)))
+
+    # Local keyword searches put the page *before* the keyword. In the
+    # reverse order Kleinanzeigen interprets "seite:2" as the search term.
+    if (
+        len(segments) == 3
+        and segments[0].startswith("s-")
+        and re.fullmatch(r"k\d+l\d+(?:r\d+)?", segments[-1])
+    ):
+        if page_number > 1:
+            segments.insert(1, f"seite:{page_number}")
         return urlunparse(parsed._replace(path="/" + "/".join(segments)))
 
     if page_number > 1:
@@ -344,7 +374,7 @@ class UltraOptimizedScraper:
         try:
             # Promoted/Top/Pro cards are real requested results too. Persisted
             # jobs deduplicate them by canonical ad ID across cards and pages.
-            items = await page.query_selector_all(".ad-listitem article[data-adid]")
+            items = await page.query_selector_all(_SEARCH_CARD_SELECTOR)
 
             results = []
 
@@ -386,7 +416,7 @@ class UltraOptimizedScraper:
         """
 
         try:
-            items = await page.query_selector_all(".ad-listitem article[data-adid]")
+            items = await page.query_selector_all(_SEARCH_CARD_SELECTOR)
             extracted: list[dict[str, Any]] = []
             for offset in range(0, len(items), 10):
                 batch = items[offset : offset + 10]
@@ -398,7 +428,10 @@ class UltraOptimizedScraper:
             unique: dict[str, dict[str, Any]] = {}
             for listing in extracted:
                 listing_id = str(listing["adid"])
-                unique.setdefault(listing_id, listing)
+                first = unique.setdefault(listing_id, listing)
+                # Top placements omit the date displayed on the organic copy.
+                if not first["published_at"] and listing["published_at"]:
+                    first["published_at"] = listing["published_at"]
             return list(unique.values())
         except SearchExtractionError:
             raise
@@ -421,24 +454,29 @@ class UltraOptimizedScraper:
                 return None
 
             title_task = self._get_text_content(
-                article, "h2.text-module-begin a.ellipsis", strict=strict
+                article,
+                "h2.text-module-begin, h3",
+                strict=strict,
             )
             price_task = self._get_text_content(
                 article,
-                "p.aditem-main--middle--price-shipping--price",
+                "p.aditem-main--middle--price-shipping--price, h3 ~ div > p.text-title3:not(.line-through)",
                 strict=strict,
             )
             desc_task = self._get_text_content(
-                article, "p.aditem-main--middle--description", strict=strict
+                article, "p.aditem-main--middle--description, h3 + p", strict=strict
             )
             date_task = self._get_text_content(
-                article, ".aditem-main--top--right", strict=strict
+                article,
+                ".aditem-main--top--right, [data-title='calendarOutline'] + span",
+                strict=strict,
             )
 
             location_task = article.evaluate(
                 """
                 (el) => {
                     const selectors = [
+                        "[data-title='locationOutline'] + span",
                         ".aditem-main--top--left",
                         ".aditem-main--top--left--location",
                         "[class*='aditem-main--top--left']",
@@ -484,12 +522,16 @@ class UltraOptimizedScraper:
                 return_exceptions=not strict,
             )
 
+            if strict and (not isinstance(title_text, str) or not title_text.strip()):
+                raise SearchExtractionError("search result card is missing its title")
+
             if isinstance(price_text, str):
                 price_text = (
                     price_text.replace("€", "")
                     .replace("VB", "")
                     .replace(".", "")
                     .strip()
+                    or price_text.strip()
                 )
             else:
                 price_text = ""
@@ -546,6 +588,39 @@ class UltraOptimizedScraper:
                 raise
             return ""
 
+    async def _read_search_results(
+        self, page, *, render_grace_seconds: float = _SEARCH_RENDER_GRACE_SECONDS
+    ) -> tuple[list[dict[str, Any]], int | None, int | None, int | None]:
+        """Return cards and summary metadata, or raise for an unrecognized page."""
+        # DOMContentLoaded may precede the cards. Allow a short render window
+        # before treating a page without cards or an explicit zero as broken.
+        deadline = time.monotonic() + render_grace_seconds
+        while True:
+            summary = await page.query_selector(_BREADCRUMB_SELECTOR)
+            total, pages, size = _parse_breadcrumb_summary(
+                await summary.inner_text() if summary else ""
+            )
+            if total == 0 and not await summary.is_visible():
+                total, pages, size = None, None, None
+            if total is None:
+                empty_panel = await page.query_selector(_EMPTY_RESULT_SELECTOR)
+                if empty_panel and await empty_panel.is_visible():
+                    total, pages, size = _parse_breadcrumb_summary(
+                        await empty_panel.inner_text()
+                    )
+            if total == 0:
+                # A confirmed empty page may also show unrelated recommendations.
+                return [], 0, 0, None
+            listings = await self.extract_ads_for_job(page)
+            if listings:
+                return listings, total, pages, size
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SearchExtractionError(
+                    "no search result cards or confirmed empty result found"
+                )
+            await asyncio.sleep(min(0.2, remaining))
+
     async def execute_search_page(
         self,
         *,
@@ -595,13 +670,16 @@ class UltraOptimizedScraper:
                     )
                 if isinstance(status, int) and status >= 500:
                     raise RuntimeError("search page returned a transient server error")
-                listings = await self.extract_ads_for_job(navigated_page)
-                breadcrumb_text = ""
-                breadcrumb = await navigated_page.query_selector(_BREADCRUMB_SELECTOR)
-                if breadcrumb is not None:
-                    breadcrumb_text = await breadcrumb.inner_text()
-                total_results, total_pages, page_size = _parse_breadcrumb_summary(
-                    breadcrumb_text
+                grace = min(
+                    _SEARCH_RENDER_GRACE_SECONDS, extraction_timeout_seconds / 2
+                )
+                (
+                    listings,
+                    total_results,
+                    total_pages,
+                    page_size,
+                ) = await self._read_search_results(
+                    navigated_page, render_grace_seconds=grace
                 )
 
                 min_publish_date = search.get("min_publish_date")
@@ -622,9 +700,7 @@ class UltraOptimizedScraper:
                 if total_pages is not None:
                     has_next_page = page_number < total_pages
                 else:
-                    next_link = await navigated_page.query_selector(
-                        'a[rel="next"], .pagination-next:not(.is-disabled) a'
-                    )
+                    next_link = await navigated_page.query_selector(_NEXT_PAGE_SELECTOR)
                     if next_link is not None:
                         has_next_page = True
                     elif not listings:

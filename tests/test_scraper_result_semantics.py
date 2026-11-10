@@ -1,6 +1,7 @@
 """Offline regression tests for scraper success/failure semantics."""
 
 import asyncio
+from unittest.mock import AsyncMock
 from datetime import datetime
 
 import pytest
@@ -44,12 +45,12 @@ class _SearchArticle:
 
     async def query_selector(self, selector: str):
         values = {
-            "h2.text-module-begin a.ellipsis": f"Anzeige {self.listing_id}",
+            "h2.text-module-begin": f"Anzeige {self.listing_id}",
             "p.aditem-main--middle--price-shipping--price": "10 €",
             "p.aditem-main--middle--description": "Beschreibung",
             ".aditem-main--top--right": "",
         }
-        return _TextElement(values[selector])
+        return _TextElement(values[selector.split(", ")[0]])
 
     async def evaluate(self, _script: str) -> str:
         return "10115 Berlin"
@@ -160,7 +161,8 @@ def test_job_extraction_includes_promoted_cards_and_deduplicates_by_id(
 
     listings, selectors = asyncio.run(scenario())
 
-    assert selectors == [".ad-listitem article[data-adid]"]
+    assert len(selectors) == 1
+    assert ".ad-listitem article[data-adid]" in selectors[0]
     assert ":not(.is-topad)" not in selectors[0]
     assert "badge-hint-pro" not in selectors[0]
     assert [listing["adid"] for listing in listings] == [
@@ -209,7 +211,7 @@ def test_job_search_stops_pagination_after_publish_date_cutoff(
             return type("FakeResponse", (), {"status": 200, "headers": {}})()
 
         async def query_selector(self, selector):
-            if selector == ".breadcrump-summary":
+            if ".breadcrump-summary" in selector.split(", "):
                 return _TextElement("1 - 25 von 100 Anzeigen")
             return None
 
@@ -261,3 +263,78 @@ def test_job_search_stops_pagination_after_publish_date_cutoff(
     assert result.listings == ()
     assert result.total_results == 100
     assert result.has_next_page is False
+
+
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        ("Autos 1 - 25 von 48 Gebrauchtwagen", (48, 2, 25)),
+        ("1 - 25 von 63 Ergebnissen für „Fensterreinigung“ in 38126", (63, 3, 25)),
+        ("51 - 63 von 63 Ergebnissen", (63, None, None)),
+        ("0 Anzeigen", (0, 0, None)),
+        ("Es wurden keine Ergebnisse für „1 - 25 von 27“ gefunden", (0, 0, None)),
+        ("Suchanfrage für „0 Treffer“", (None, None, None)),
+    ],
+)
+def test_search_result_summary(summary, expected):
+    assert _parse_breadcrumb_summary(summary) == expected
+
+
+class _RenderedSearchPage:
+    def __init__(self, *, summary="", summary_visible=True, empty_panel=None):
+        self.summary = summary
+        self.summary_visible = summary_visible
+        self.empty_panel = empty_panel
+
+    async def query_selector(self, selector):
+        if "#srp-breadcrumb-summary" in selector.split(", ") and self.summary:
+            element = _TextElement(self.summary)
+            element.is_visible = AsyncMock(return_value=self.summary_visible)
+            return element
+        if selector == "#saved-search-empty-result":
+            return self.empty_panel
+        return None
+
+
+@pytest.mark.parametrize(
+    ("summary", "visible"),
+    [("", True), ("1 - 25 von 63 Ergebnissen", True), ("0 Ergebnisse", False)],
+)
+async def test_missing_cards_do_not_mean_zero_results(
+    outbound_controller, summary, visible
+):
+    scraper = UltraOptimizedScraper(_FakeBrowserManager(), outbound_controller)
+    scraper.extract_ads_for_job = AsyncMock(return_value=[])
+    page = _RenderedSearchPage(summary=summary, summary_visible=visible)
+    try:
+        with pytest.raises(SearchExtractionError, match="no search result cards"):
+            await scraper._read_search_results(page, render_grace_seconds=0)
+    finally:
+        await scraper.cleanup()
+
+
+async def test_explicit_empty_result_ignores_recommendations(outbound_controller):
+    scraper = UltraOptimizedScraper(_FakeBrowserManager(), outbound_controller)
+    scraper.extract_ads_for_job = AsyncMock(return_value=[{"adid": "123"}])
+    panel = _TextElement("Es wurden leider keine Ergebnisse für „test“ gefunden.")
+    panel.is_visible = AsyncMock(return_value=True)
+    try:
+        assert await scraper._read_search_results(
+            _RenderedSearchPage(empty_panel=panel), render_grace_seconds=0
+        ) == ([], 0, 0, None)
+        scraper.extract_ads_for_job.assert_not_called()
+    finally:
+        await scraper.cleanup()
+
+
+async def test_delayed_results_are_read_within_render_window(outbound_controller):
+    scraper = UltraOptimizedScraper(_FakeBrowserManager(), outbound_controller)
+    cards = [{"adid": "123"}]
+    scraper.extract_ads_for_job = AsyncMock(side_effect=[[], cards])
+    try:
+        assert await scraper._read_search_results(
+            _RenderedSearchPage(summary="1 - 25 von 63 Ergebnissen"),
+            render_grace_seconds=0.05,
+        ) == (cards, 63, 3, 25)
+    finally:
+        await scraper.cleanup()

@@ -41,6 +41,16 @@ def test_keyword_shortcut_normalizes_the_previously_broken_suffix_form(builder):
 
 
 @pytest.mark.parametrize("builder", [inject_page, _job_url])
+def test_local_keyword_search_preserves_keyword_and_radius_on_later_pages(builder):
+    root = "https://www.kleinanzeigen.de/s-braunschweig"
+    base = f"{root}/fensterreinigung/k0l2457r30"
+    second = f"{root}/seite:2/fensterreinigung/k0l2457r30"
+    assert builder(base, 2) == second
+    assert builder(second, 1) == base
+    assert builder(second, 3) == f"{root}/seite:3/fensterreinigung/k0l2457r30"
+
+
+@pytest.mark.parametrize("builder", [inject_page, _job_url])
 def test_category_page_precedes_filter_and_preserves_encoded_filters(builder):
     base = (
         "https://www.kleinanzeigen.de/s-autos/volkswagen/preis:1000:15000/klima/"
